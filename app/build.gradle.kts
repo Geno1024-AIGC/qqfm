@@ -34,16 +34,24 @@ android {
     // that app, or the platform refuses it before the install even starts. The key is
     // supplied by the environment rather than kept in the repository, and a build
     // without one still works, it just cannot be installed over another one.
+    //
+    // GitHub Actions turns an unset secret into an empty variable rather than leaving
+    // it unset, so blank values have to count as absent or this configuration fails.
     val signingKeyStore = providers.environmentVariable("QQFM_SIGNING_STORE_FILE")
         .orElse(providers.gradleProperty("qqfm.signing.storeFile"))
+        .orNull
+        ?.takeIf { it.isNotBlank() }
 
     signingConfigs {
-        if (signingKeyStore.isPresent) {
+        if (signingKeyStore != null) {
             create("release") {
-                storeFile = file(signingKeyStore.get())
-                storePassword = providers.environmentVariable("QQFM_SIGNING_STORE_PASSWORD").orNull
-                keyAlias = providers.environmentVariable("QQFM_SIGNING_KEY_ALIAS").getOrElse("qqfm")
-                keyPassword = providers.environmentVariable("QQFM_SIGNING_KEY_PASSWORD").orNull
+                storeFile = file(signingKeyStore)
+                storePassword = providers.environmentVariable("QQFM_SIGNING_STORE_PASSWORD")
+                    .orNull?.takeIf { it.isNotBlank() }
+                keyAlias = providers.environmentVariable("QQFM_SIGNING_KEY_ALIAS")
+                    .orNull?.takeIf { it.isNotBlank() } ?: "qqfm"
+                keyPassword = providers.environmentVariable("QQFM_SIGNING_KEY_PASSWORD")
+                    .orNull?.takeIf { it.isNotBlank() }
             }
         }
     }
@@ -54,7 +62,7 @@ android {
             // The published build is the debug one, so the debug variant is the one that
             // has to be signed with the shared key; without it this falls back to the
             // machine-local debug key and no two builds can replace each other.
-            if (signingKeyStore.isPresent) {
+            if (signingKeyStore != null) {
                 signingConfig = signingConfigs.getByName("release")
             }
         }
