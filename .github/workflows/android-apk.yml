@@ -1,7 +1,8 @@
 name: Android APK
 
-# Builds a debug APK for side loading and republishes a single rolling pre-release
-# so there is always exactly one download available.
+# Builds a debug APK for side loading and republishes it as a pre-release tagged
+# with the build stamp. Older pre-releases are deleted, so exactly one download
+# stays available while each build keeps its own version-named tag.
 on:
   push:
     branches: [master]
@@ -13,10 +14,6 @@ permissions:
 concurrency:
   group: android-apk-${{ github.ref }}
   cancel-in-progress: true
-
-env:
-  # One rolling tag. Every successful build replaces the release behind it.
-  RELEASE_TAG: pre-release
 
 jobs:
   build:
@@ -146,7 +143,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: Republish rolling pre-release
+    name: Publish pre-release
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -168,20 +165,24 @@ jobs:
           name: apk
           path: dist
 
-      - name: Replace the rolling pre-release
+      - name: Publish the pre-release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
+          # The build stamp is the tag: it orders the releases and keeps each build
+          # addressable, while the version is what the in-app updater reads.
+          TAG="$VERSION_NAME"
+
           notes="$(cat <<EOF
-          Rolling pre-release, replaced on every successful build.
+          Pre-release built from master.
 
           - version \`$VERSION_NAME\` (versionCode \`$VERSION_CODE\`)
           - commit \`$SHORT_SHA\`
           - run $GITHUB_RUN_NUMBER, branch \`${GITHUB_REF_NAME}\`
 
-          Every build is signed with one long-lived key, so \`adb install -r\`
+          Each build is signed with one long-lived key, so \`adb install -r\`
           replaces an installed copy in place, and the in-app updater can install
           this build over the one already on the device.
           EOF
@@ -194,13 +195,22 @@ jobs:
             exit 1
           fi
           file_name="${built[0]#dist/}"
-          echo "Publishing $file_name"
+          echo "Publishing $file_name as $TAG"
 
-          # --cleanup-tag as well, or the tag survives and the next create fails.
-          gh release delete "$RELEASE_TAG" --yes --cleanup-tag 2>/dev/null || true
-          gh release create "$RELEASE_TAG" "${built[0]}" \
+          # Only the newest pre-release is kept, so a repeat of the same commit can
+          # replace its own tag and every older one is removed with its tag.
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+          gh release list --limit 100 --json tagName,isPrerelease \
+            --jq '.[] | select(.isPrerelease == true) | .tagName' \
+            | while IFS= read -r old_tag; do
+                if [ -n "$old_tag" ] && [ "$old_tag" != "$TAG" ]; then
+                  gh release delete "$old_tag" --yes --cleanup-tag
+                fi
+              done
+
+          gh release create "$TAG" "${built[0]}" \
             --title "QQFM $VERSION_NAME" \
             --notes "$notes" \
             --prerelease
 
-          echo "Published $file_name to the $RELEASE_TAG pre-release"
+          echo "Published $file_name to the $TAG pre-release"
