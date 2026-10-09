@@ -1,0 +1,38 @@
+package com.geno1024.ai.qqfm.data
+
+import android.app.Application
+import com.geno1024.ai.qqfm.update.Updater
+
+/**
+ * The handful of preferences the updater keeps.
+ */
+class AppSettings(private val settings: Settings) {
+
+    /** Where builds are downloaded from; the feed itself is always GitHub's. */
+    var updateSource: Updater.Source
+        get() = Updater.sourceFrom(settings.string(KEY_SOURCE))
+        set(value) = settings.write(strings = mapOf(KEY_SOURCE to value.id))
+
+    /**
+     * The newest build the user has been told about.
+     *
+     * Remembering it means an update notice appears once for a build rather than on
+     * every visit, and it is what makes "you are up to date" mean something on a
+     * channel that never stops moving.
+     */
+    var dismissedVersion: String?
+        get() = settings.string(KEY_DISMISSED)
+        set(value) = settings.write(
+            strings = if (value == null) emptyMap() else mapOf(KEY_DISMISSED to value),
+            removed = if (value == null) setOf(KEY_DISMISSED) else emptySet(),
+        )
+
+    companion object {
+        fun of(application: Application) = AppSettings(
+            SharedPreferencesSettings(application.getSharedPreferences("qqfm", Application.MODE_PRIVATE)),
+        )
+
+        const val KEY_SOURCE = "update.source"
+        const val KEY_DISMISSED = "update.dismissed"
+    }
+}
