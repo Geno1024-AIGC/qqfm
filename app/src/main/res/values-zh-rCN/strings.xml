@@ -1,4 +1,35 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">QQ 图片管理</string>
+
+    <string name="action_back">返回</string>
+    <string name="action_ok">确定</string>
+    <string name="action_check_update">检查更新</string>
+    <string name="error_title">出错了</string>
+
+    <string name="update_title">升级</string>
+    <string name="update_current_version">当前版本 %1$s</string>
+    <string name="update_checking">正在检查新版本…</string>
+    <string name="update_up_to_date">没有比当前更新的版本。</string>
+    <string name="update_download">下载</string>
+    <string name="update_downloading">下载中 — %1$s</string>
+    <string name="update_install">安装</string>
+    <string name="update_not_now">暂不</string>
+    <string name="update_source_heading">下载来源</string>
+    <string name="update_channel">正在安装</string>
+    <string name="update_installed">已安装，新版本可以使用了。</string>
+    <string name="update_install_canceled">安装已取消。</string>
+    <string name="update_install_conflict">安装被拒绝：该版本与已安装应用的签名不同，两者无法互相覆盖。需要先卸载当前应用，再安装这个版本。</string>
+    <string name="update_install_invalid">下载的文件不是有效的安装包。</string>
+    <string name="update_install_incompatible">该版本无法在此设备上运行。</string>
+    <string name="update_install_no_space">存储空间不足，无法安装该版本。</string>
+    <string name="update_install_no_activity">此设备上没有可以打开 APK 的应用，无法从这里安装。</string>
+    <string name="update_install_timeout">安装用时过长，已放弃。</string>
+    <string name="update_install_blocked">此设备上的某个应用阻止了安装。</string>
+    <string name="update_install_failed">安装未完成（代码 %1$d）。</string>
+    <string name="update_install_handed_off">已交给系统安装，结果会以通知形式返回。</string>
+    <string name="update_install_not_started">无法开始安装：%1$s。</string>
+    <string name="update_install_permission_needed">本应用尚未获得“安装未知应用”的权限。请为它开启该权限，然后再次点击安装。</string>
+    <string name="update_install_saved_to_downloads">已保存到“下载”，请在打开的窗口中确认安装。</string>
+    <string name="update_install_confirm">请在打开的窗口中确认安装。</string>
 </resources>

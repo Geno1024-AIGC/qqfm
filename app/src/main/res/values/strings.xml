@@ -1,4 +1,38 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">QQFM</string>
+
+    <string name="action_back">Back</string>
+    <string name="action_ok">OK</string>
+    <string name="action_check_update">Check for updates</string>
+    <string name="error_title">Something went wrong</string>
+
+    <string name="update_title">Updates</string>
+    <string name="update_current_version">Installed version %1$s</string>
+    <string name="update_checking">Checking for a newer build\u2026</string>
+    <string name="update_up_to_date">Nothing newer than this is published.</string>
+    <string name="update_download">Download</string>
+    <string name="update_downloading">Downloading \u2014 %1$s</string>
+    <string name="update_install">Install</string>
+    <string name="update_not_now">Not now</string>
+    <string name="update_source_heading">Download from</string>
+    <string name="update_channel">Installing</string>
+    <string name="update_installed">Installed. The new version is ready to use.</string>
+    <string name="update_install_canceled">The install was cancelled.</string>
+    <string name="update_install_conflict">The install was refused because that build is signed with a
+        different key than the app you have installed. The two cannot replace one another,
+        so this build has to be installed from scratch: remove the current app first, then
+        install it.</string>
+    <string name="update_install_invalid">The downloaded file was not a valid build.</string>
+    <string name="update_install_incompatible">That build will not run on this device.</string>
+    <string name="update_install_no_space">There is not enough room to install that build.</string>
+    <string name="update_install_no_activity">Nothing on this device can open an APK, so the build cannot be installed from here.</string>
+    <string name="update_install_timeout">The install took too long and was given up on.</string>
+    <string name="update_install_blocked">Something on this device refused to allow the install.</string>
+    <string name="update_install_failed">The install did not finish (code %1$d).</string>
+    <string name="update_install_handed_off">The install was handed to the system; its result arrives as a notification.</string>
+    <string name="update_install_not_started">The install could not be started: %1$s.</string>
+    <string name="update_install_permission_needed">This app has not been allowed to install unknown apps. Turn that on for it, then tap Install again.</string>
+    <string name="update_install_saved_to_downloads">Saved to Downloads; confirm the install in the window that opens.</string>
+    <string name="update_install_confirm">Confirm the install in the window that opens.</string>
 </resources>
