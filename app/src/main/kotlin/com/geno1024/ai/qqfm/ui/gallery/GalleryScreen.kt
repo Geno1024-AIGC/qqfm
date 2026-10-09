@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Done
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
@@ -71,6 +72,7 @@ fun GalleryScreen(
     state: GalleryUiState,
     viewModel: GalleryViewModel,
     onOpen: (Int) -> Unit,
+    onOpenUpdates: () -> Unit,
 ) {
     val snackbarHostState = remember { SnackbarHostState() }
     LaunchedEffect(state.message) {
@@ -81,7 +83,7 @@ fun GalleryScreen(
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
-        topBar = { GalleryTopBar(state, viewModel) },
+        topBar = { GalleryTopBar(state, viewModel, onOpenUpdates) },
         bottomBar = {
             if (state.selectionActive) SelectionBar(state, viewModel)
         },
@@ -101,7 +103,11 @@ fun GalleryScreen(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun GalleryTopBar(state: GalleryUiState, viewModel: GalleryViewModel) {
+private fun GalleryTopBar(
+    state: GalleryUiState,
+    viewModel: GalleryViewModel,
+    onOpenUpdates: () -> Unit,
+) {
     TopAppBar(
         title = {
             if (state.selectionActive) {
@@ -129,6 +135,9 @@ private fun GalleryTopBar(state: GalleryUiState, viewModel: GalleryViewModel) {
                 SortMenu(state.sortMode, viewModel::setSortMode)
                 IconButton(onClick = viewModel::refresh, enabled = !state.scanning) {
                     Icon(Icons.Filled.Refresh, contentDescription = "重新扫描")
+                }
+                IconButton(onClick = onOpenUpdates) {
+                    Icon(Icons.Filled.Info, contentDescription = "升级")
                 }
             }
         },
