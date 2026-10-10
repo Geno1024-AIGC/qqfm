@@ -14,7 +14,7 @@ class MediaRepository(private val context: Context) {
         val totalBytes: Long,
     )
 
-    data class DeleteResult(val filesRemoved: Int, val bytesReclaimed: Long)
+    data class DeleteResult(val filesRemoved: Long, val bytesReclaimed: Long)
 
     private fun cacheFile(source: MediaSource): File = File(context.cacheDir, "scan-${source.id}.tsv")
 
@@ -98,7 +98,7 @@ class MediaRepository(private val context: Context) {
      * one did.
      */
     fun delete(items: List<MediaItem>, onProgress: (Int) -> Unit = {}): DeleteResult {
-        if (items.isEmpty()) return DeleteResult(0, 0L)
+        if (items.isEmpty()) return DeleteResult(0L, 0L)
         // The scanned path is the one file known to exist, so it goes first; the
         // derived variants only add the sibling trees of older QQ layouts.
         val candidates = items.flatMap { item ->
@@ -115,13 +115,13 @@ class MediaRepository(private val context: Context) {
             done++
             onProgress(done)
         }
-        if (present.isEmpty()) return DeleteResult(0, 0L)
+        if (present.isEmpty()) return DeleteResult(0L, 0L)
 
         present.chunked(128).forEach { batch ->
             val args = batch.joinToString(" ") { RootShell.shellQuote(it) }
             RootShell.exec("rm -f -- $args")
         }
         val reclaimed = items.filter { it.path in present }.sumOf { it.size }
-        return DeleteResult(present.size, reclaimed)
+        return DeleteResult(present.size.toLong(), reclaimed)
     }
 }

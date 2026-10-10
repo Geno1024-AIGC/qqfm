@@ -9,6 +9,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.geno1024.ai.qqfm.ui.about.AboutScreen
 import com.geno1024.ai.qqfm.ui.gallery.GalleryScreen
 import com.geno1024.ai.qqfm.ui.gallery.GalleryViewModel
 import com.geno1024.ai.qqfm.ui.update.UpdatesScreen
@@ -20,6 +21,7 @@ fun QqfmApp(viewModel: GalleryViewModel = viewModel()) {
     var viewerId by remember { mutableStateOf<String?>(null) }
     var viewerAnchor by remember { mutableStateOf<Int?>(null) }
     var showUpdates by remember { mutableStateOf(false) }
+    var showAbout by remember { mutableStateOf(false) }
 
     val items = state.items
     val start = viewerId?.let { id -> items.firstOrNull { it.id == id } }
@@ -36,12 +38,19 @@ fun QqfmApp(viewModel: GalleryViewModel = viewModel()) {
     }
 
     // The system back button mirrors the in-app back arrows: it closes the viewer
-    // and the updates page before ever reaching the gallery's default exit.
+    // and the pushed pages before ever reaching the gallery's default exit.
     BackHandler(enabled = showUpdates) { showUpdates = false }
-    BackHandler(enabled = !showUpdates && start != null) { viewerId = null }
+    BackHandler(enabled = showAbout && !showUpdates) { showAbout = false }
+    BackHandler(enabled = !showUpdates && !showAbout && start != null) { viewerId = null }
 
     when {
         showUpdates -> UpdatesScreen(onClose = { showUpdates = false })
+        showAbout -> AboutScreen(
+            cleanedFiles = state.cleanedFiles,
+            cleanedBytes = state.cleanedBytes,
+            onClose = { showAbout = false },
+            onOpenUpdates = { showUpdates = true },
+        )
         start != null -> ViewerScreen(
             items = items,
             start = start,
@@ -58,7 +67,7 @@ fun QqfmApp(viewModel: GalleryViewModel = viewModel()) {
             state = state,
             viewModel = viewModel,
             onOpen = { viewerId = it.id },
-            onOpenUpdates = { showUpdates = true },
+            onOpenAbout = { showAbout = true },
         )
     }
 }

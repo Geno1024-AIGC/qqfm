@@ -87,7 +87,7 @@ fun GalleryScreen(
     state: GalleryUiState,
     viewModel: GalleryViewModel,
     onOpen: (MediaItem) -> Unit,
-    onOpenUpdates: () -> Unit,
+    onOpenAbout: () -> Unit,
 ) {
     val snackbarHostState = remember { SnackbarHostState() }
     LaunchedEffect(state.message) {
@@ -98,7 +98,7 @@ fun GalleryScreen(
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
-        topBar = { GalleryTopBar(state, viewModel, onOpenUpdates) },
+        topBar = { GalleryTopBar(state, viewModel, onOpenAbout) },
         bottomBar = {
             if (state.selectionActive) SelectionBar(state, viewModel)
         },
@@ -139,7 +139,7 @@ fun GalleryScreen(
 private fun GalleryTopBar(
     state: GalleryUiState,
     viewModel: GalleryViewModel,
-    onOpenUpdates: () -> Unit,
+    onOpenAbout: () -> Unit,
 ) {
     TopAppBar(
         title = {
@@ -174,8 +174,8 @@ private fun GalleryTopBar(
                 IconButton(onClick = viewModel::refresh, enabled = !state.scanning) {
                     Icon(Icons.Filled.Refresh, contentDescription = "重新扫描")
                 }
-                IconButton(onClick = onOpenUpdates) {
-                    Icon(Icons.Filled.Info, contentDescription = "升级")
+                IconButton(onClick = onOpenAbout) {
+                    Icon(Icons.Filled.Info, contentDescription = "关于")
                 }
             }
         },

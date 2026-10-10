@@ -53,6 +53,8 @@ data class GalleryUiState(
     val collapsed: Set<String> = emptySet(),
     val displayRows: List<GalleryRow> = emptyList(),
     val frozen: Set<String> = emptySet(),
+    val cleanedFiles: Long = 0L,
+    val cleanedBytes: Long = 0L,
     val selection: Set<String> = emptySet(),
     val selectionBytes: Long = 0L,
     val busy: Boolean = false,
@@ -78,7 +80,13 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     init {
         viewModelScope.launch {
-            _state.update { it.copy(frozen = settings.frozenIds) }
+            _state.update {
+                it.copy(
+                    frozen = settings.frozenIds,
+                    cleanedFiles = settings.cleanedFiles,
+                    cleanedBytes = settings.cleanedBytes,
+                )
+            }
             val root = withContext(Dispatchers.IO) { RootShell.isRootAvailable() }
             _state.update { it.copy(rootAvailable = root, loading = false) }
         }
@@ -262,6 +270,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             _state.update { it.copy(busy = true) }
             val result = withContext(Dispatchers.IO) { repository.delete(selected) }
+            recordCleanup(result)
             val removed = selected.mapTo(HashSet()) { it.id }
             rawItems = rawItems.filterNot { it.id in removed }
             byId = rawItems.associateBy { it.id }
@@ -287,6 +296,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             _state.update { it.copy(busy = true) }
             val result = withContext(Dispatchers.IO) { repository.delete(listOf(item)) }
+            recordCleanup(result)
             rawItems = rawItems.filterNot { it.id == item.id }
             byId = rawItems.associateBy { it.id }
             withContext(Dispatchers.IO) { repository.save(source, rawItems) }
@@ -308,6 +318,18 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     private fun bytesOf(selection: Set<String>): Long =
         selection.sumOf { byId[it]?.size ?: 0L }
+
+    /** Folds a finished deletion into the lifetime tally the about page shows. */
+    private fun recordCleanup(result: com.geno1024.ai.qqfm.data.MediaRepository.DeleteResult) {
+        if (result.filesRemoved <= 0L && result.bytesReclaimed <= 0L) return
+        settings.recordCleanup(result.filesRemoved, result.bytesReclaimed)
+        _state.update {
+            it.copy(
+                cleanedFiles = it.cleanedFiles + result.filesRemoved,
+                cleanedBytes = it.cleanedBytes + result.bytesReclaimed,
+            )
+        }
+    }
 
     private fun sort(items: List<MediaItem>, mode: SortMode): List<MediaItem> {
         val comparator = when (mode) {

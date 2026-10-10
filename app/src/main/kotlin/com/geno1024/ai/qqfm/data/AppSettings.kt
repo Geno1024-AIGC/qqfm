@@ -40,6 +40,32 @@ class AppSettings(private val settings: Settings) {
             ?: emptySet()
         set(value) = settings.write(strings = mapOf(KEY_FROZEN to value.joinToString(",")))
 
+        /**
+     * Running tally of what this app has removed, for the about page.
+     *
+     * Kept as a lifetime counter rather than a per-session one: the number is only
+     * interesting across installs of the app, not across launches of a screen.
+     */
+    var cleanedFiles: Long
+        get() = settings.string(KEY_CLEANED_FILES)?.toLongOrNull() ?: 0L
+        set(value) = settings.write(strings = mapOf(KEY_CLEANED_FILES to value.toString()))
+
+    var cleanedBytes: Long
+        get() = settings.string(KEY_CLEANED_BYTES)?.toLongOrNull() ?: 0L
+        set(value) = settings.write(strings = mapOf(KEY_CLEANED_BYTES to value.toString()))
+
+    /** Adds one deletion to the tally. */
+    fun recordCleanup(files: Long, bytes: Long) {
+        val nextFiles = cleanedFiles + files
+        val nextBytes = cleanedBytes + bytes
+        settings.write(
+            strings = mapOf(
+                KEY_CLEANED_FILES to nextFiles.toString(),
+                KEY_CLEANED_BYTES to nextBytes.toString(),
+            ),
+        )
+    }
+
     companion object {
         fun of(application: Application) = AppSettings(
             SharedPreferencesSettings(application.getSharedPreferences("qqfm", Application.MODE_PRIVATE)),
@@ -48,5 +74,7 @@ class AppSettings(private val settings: Settings) {
         const val KEY_SOURCE = "update.source"
         const val KEY_DISMISSED = "update.dismissed"
         const val KEY_FROZEN = "gallery.frozen"
+        const val KEY_CLEANED_FILES = "cleanup.files"
+        const val KEY_CLEANED_BYTES = "cleanup.bytes"
     }
 }
