@@ -294,11 +294,11 @@ private fun GalleryGrid(
             .pointerInput(Unit) {
                 detectDragGesturesAfterLongPress(
                     onDragStart = { position ->
-                        gridState.itemIndex(position, rows)?.let(viewModel::beginDrag)
+                        gridState.rowAt(position)?.let(viewModel::beginDrag)
                     },
                     onDrag = { change, _ ->
                         change.consume()
-                        gridState.itemIndex(change.position, rows)?.let(viewModel::extendDrag)
+                        gridState.rowAt(change.position)?.let(viewModel::extendDrag)
                     },
                     onDragEnd = viewModel::endDrag,
                     onDragCancel = viewModel::endDrag,
@@ -531,10 +531,15 @@ private fun Centered(content: @Composable () -> Unit) {
 }
 
 /** Maps a pointer position to the index of the item it lands on, ignoring headers. */
-private fun LazyGridState.itemIndex(position: Offset, rows: List<GalleryRow>): Int? {
-    val row = layoutInfo.visibleItemsInfo.firstOrNull { info ->
+/**
+ * The grid row under [position], read from the live layout.
+ *
+ * The row list must not be captured here: collapsing a group rebuilds the list,
+ * and a captured copy would be indexed by the *new* layout and pick the cell of
+ * whatever group used to sit there.
+ */
+private fun LazyGridState.rowAt(position: Offset): Int? =
+    layoutInfo.visibleItemsInfo.firstOrNull { info ->
         position.x >= info.offset.x && position.x < info.offset.x + info.size.width &&
             position.y >= info.offset.y && position.y < info.offset.y + info.size.height
-    }?.index ?: return null
-    return (rows.getOrNull(row) as? GalleryRow.Item)?.index
-}
+    }?.index

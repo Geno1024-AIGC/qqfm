@@ -73,7 +73,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private var rawItems: List<MediaItem> = emptyList()
     private var byId: Map<String, MediaItem> = emptyMap()
 
-    private var dragAnchor: Int = -1
+    private var dragAnchorRow: Int = -1
     private var dragPinned: Set<String> = emptySet()
 
     init {
@@ -213,21 +213,32 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    fun beginDrag(index: Int) {
-        val items = _state.value.items
-        if (index !in items.indices) return
-        if (items[index].id in _state.value.frozen) return
-        dragPinned = _state.value.selection
-        dragAnchor = index
-        updateDragSelection(dragPinned + items[index].id)
+    /**
+     * Starts a drag selection at a grid row.
+     *
+     * Rows, not item indices: a collapsed group leaves its items out of
+ * [GalleryUiState.displayRows] while they keep their positions in the items list,
+ * so a range over item indices would sweep up everything folded away in between.
+ */
+    fun beginDrag(row: Int) {
+        val state = _state.value
+        val entry = state.displayRows.getOrNull(row) as? GalleryRow.Item ?: return
+        val item = state.items.getOrNull(entry.index) ?: return
+        if (item.id in state.frozen) return
+        dragPinned = state.selection
+        dragAnchorRow = row
+        updateDragSelection(dragPinned + item.id)
     }
 
-    fun extendDrag(index: Int) {
-        if (dragAnchor < 0) return
-        val items = _state.value.items
-        if (index !in items.indices) return
-        val range = if (dragAnchor <= index) dragAnchor..index else index..dragAnchor
-        val ids = range.mapTo(HashSet()) { items[it].id }
+    fun extendDrag(row: Int) {
+        if (dragAnchorRow < 0) return
+        val state = _state.value
+        if (row !in state.displayRows.indices) return
+        val range = if (dragAnchorRow <= row) dragAnchorRow..row else row..dragAnchorRow
+        val ids = range
+            .mapNotNull { state.displayRows[it] as? GalleryRow.Item }
+            .mapNotNull { entry -> state.items.getOrNull(entry.index)?.id }
+            .toHashSet()
         updateDragSelection(dragPinned + ids)
     }
 
@@ -239,7 +250,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun endDrag() {
-        dragAnchor = -1
+        dragAnchorRow = -1
         dragPinned = emptySet()
     }
 
