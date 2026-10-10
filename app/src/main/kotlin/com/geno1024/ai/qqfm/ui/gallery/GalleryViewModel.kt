@@ -330,14 +330,12 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             while (end < items.size) {
                 val entry = items[end]
                 val other = if (byTime) bucketTime(entry.mtime) else bucketSize(entry.size)
-                if (other != bucket) break
+                if (other.key != bucket.key) break
                 bytes += entry.size
                 end++
             }
-            val prefix = if (byTime) "t" else "s"
-            val key = "$prefix$bucket"
-            rows += GalleryRow.Header(key, groupLabel(bucket, byTime), end - start, bytes)
-            if (key !in collapsed) {
+            rows += GalleryRow.Header(bucket.key, bucket.label, end - start, bytes)
+            if (bucket.key !in collapsed) {
                 for (index in start until end) rows += GalleryRow.Item(index)
             }
             start = end
@@ -345,39 +343,38 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         return rows
     }
 
+    /** One grouping: [key] identifies the group, [label] is what the header shows. */
+    private data class Bucket(val key: String, val label: String)
+
     /**
-     * Buckets are ordered newest / largest first to match the descending sorts they
-     * are grouped for; an ascending sort naturally walks the same buckets in reverse.
+     * Buckets are ordered newest first to match the descending sorts they are grouped
+     * for; an ascending sort naturally walks the same buckets in reverse. Anything
+     * older than the current month falls into one group per month, because a single
+     * "older" bucket would hide which years the backlog actually came from.
      */
-    private fun bucketTime(epochMillis: Long): Int {
-        val date = Instant.ofEpochMilli(epochMillis).atZone(ZoneId.systemDefault()).toLocalDate()
-        val today = LocalDate.now(ZoneId.systemDefault())
-        if (!date.isBefore(today)) return 0                      // today
-        if (!date.isBefore(today.minusDays(1))) return 1         // yesterday
-        if (!date.isBefore(today.with(DayOfWeek.MONDAY))) return 2 // this week
-        if (!date.isBefore(today.withDayOfMonth(1))) return 3    // this month
-        return 4                                                 // older
+    private fun bucketTime(epochMillis: Long): Bucket {
+        val zone = ZoneId.systemDefault()
+        val date = Instant.ofEpochMilli(epochMillis).atZone(zone).toLocalDate()
+        val today = LocalDate.now(zone)
+        return when {
+            !date.isBefore(today) -> Bucket("t0", "今天")
+            !date.isBefore(today.minusDays(1)) -> Bucket("t1", "昨天")
+            !date.isBefore(today.with(DayOfWeek.MONDAY)) -> Bucket("t2", "本周")
+            !date.isBefore(today.withDayOfMonth(1)) -> Bucket("t3", "本月")
+            else -> Bucket("m:${date.year}-${date.monthValue}", "${date.year} 年 ${date.monthValue} 月")
+        }
     }
 
-    private fun bucketSize(bytes: Long): Int {
+    private fun bucketSize(bytes: Long): Bucket {
         val kib = 1024L
         val mib = 1024L * 1024L
         return when {
-            bytes < 64L * kib -> 0
-            bytes < mib -> 1
-            bytes < 8L * mib -> 2
-            bytes < 64L * mib -> 3
-            else -> 4
+            bytes < 64L * kib -> Bucket("s0", "< 64 KiB")
+            bytes < mib -> Bucket("s1", "64 KiB – 1 MiB")
+            bytes < 8L * mib -> Bucket("s2", "1 – 8 MiB")
+            bytes < 64L * mib -> Bucket("s3", "8 – 64 MiB")
+            else -> Bucket("s4", "≥ 64 MiB")
         }
-    }
-
-    private fun groupLabel(bucket: Int, byTime: Boolean): String {
-        val labels = if (byTime) {
-            arrayOf("今天", "昨天", "本周", "本月", "更早")
-        } else {
-            arrayOf("< 64 KiB", "64 KiB – 1 MiB", "1 – 8 MiB", "8 – 64 MiB", "≥ 64 MiB")
-        }
-        return labels[bucket.coerceIn(0, labels.lastIndex)]
     }
 }
 
