@@ -21,6 +21,7 @@ import java.time.DayOfWeek
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
+import java.util.Locale
 
 enum class SortMode {
     TIME_DESC,
@@ -398,16 +399,37 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    /**
+     * Size groups double from a 64 KiB floor: 64–128 KiB, 128–256 KiB, and so on up
+     * to 64 MiB, with everything above that in one open bucket.
+     *
+     * The steps are exact powers of two rather than hand-picked round numbers, so
+     * the boundaries line up with what the unit means and adding a step later cannot
+     * silently drop a range.
+     */
     private fun bucketSize(bytes: Long): Bucket {
-        val kib = 1024L
-        val mib = 1024L * 1024L
-        return when {
-            bytes < 64L * kib -> Bucket("s0", "< 64 KiB")
-            bytes < mib -> Bucket("s1", "64 KiB – 1 MiB")
-            bytes < 8L * mib -> Bucket("s2", "1 – 8 MiB")
-            bytes < 64L * mib -> Bucket("s3", "8 – 64 MiB")
-            else -> Bucket("s4", "≥ 64 MiB")
+        if (bytes < SIZE_STEP) return Bucket("s0", "< ${plainSize(SIZE_STEP)}")
+        if (bytes >= SIZE_TOP) return Bucket("stop", "≥ ${plainSize(SIZE_TOP)}")
+        var index = 0
+        var steps = bytes / SIZE_STEP
+        while (steps >= 2L) {
+            steps /= 2L
+            index++
         }
+        val low = SIZE_STEP shl index
+        return Bucket("s${index + 1}", "${plainSize(low)} – ${plainSize(low * 2)}")
+    }
+
+    /** Sizes without the decimal fraction, for labels that are always round. */
+    private fun plainSize(bytes: Long): String {
+        val units = arrayOf("B", "KiB", "MiB", "GiB")
+        var value = bytes.toDouble()
+        var unit = 0
+        while (value >= 1024.0 && unit < units.lastIndex) {
+            value /= 1024.0
+            unit++
+        }
+        return String.format(Locale.ROOT, "%.0f %s", value, units[unit])
     }
 }
 
@@ -418,3 +440,6 @@ fun sortLabel(mode: SortMode): String = when (mode) {
     SortMode.SIZE_ASC -> "大小（小 → 大）"
     SortMode.NAME -> "名称"
 }
+
+private const val SIZE_STEP = 64L * 1024
+private const val SIZE_TOP = 64L * 1024 * 1024
