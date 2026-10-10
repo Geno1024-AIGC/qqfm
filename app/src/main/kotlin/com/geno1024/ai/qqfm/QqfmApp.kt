@@ -1,6 +1,8 @@
 package com.geno1024.ai.qqfm
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -9,6 +11,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.geno1024.ai.qqfm.ui.about.AboutScreen
@@ -24,7 +27,15 @@ fun QqfmApp(viewModel: GalleryViewModel = viewModel()) {
     var showAbout by remember { mutableStateOf(false) }
 
     val items = state.items
-    val start = viewerId?.let { id -> items.firstOrNull { it.id == id } }
+
+    // Resolved without a null gap on purpose. Deleting the image on screen removes it
+    // from the list, and a plain lookup would leave the viewer with nothing to show
+    // for one frame, which showed up as a flash of the gallery before the next image.
+    val start = viewerId?.let { id ->
+        items.firstOrNull { it.id == id }
+            ?: items.getOrNull(viewerAnchor ?: 0)
+            ?: items.lastOrNull()
+    }
 
     // Hoisted out of the gallery so opening an image does not throw the scroll
     // position away with the composition: going back has to land where it left off.
@@ -33,15 +44,10 @@ fun QqfmApp(viewModel: GalleryViewModel = viewModel()) {
         LazyGridState()
     }
 
-    // Deleting the image on screen drops it out of the items list. Rather than
-    // closing, the viewer slides onto whatever took its place, which is the next
-    // image in the current sort order.
-    LaunchedEffect(viewerId, items) {
-        if (viewerId == null || items.any { it.id == viewerId }) return@LaunchedEffect
-        val anchor = viewerAnchor
-        viewerAnchor = null
-        viewerId = items.getOrNull(anchor ?: 0)?.id
-            ?: items.lastOrNull()?.id
+    // Keep the id pointing at the image actually on screen, so the fallback above
+    // only ever has to step in on the one deletion it exists for.
+    LaunchedEffect(start?.id) {
+        if (start != null && viewerId != start.id) viewerId = start.id
     }
 
     // The system back button mirrors the in-app back arrows: it closes the viewer
@@ -49,30 +55,39 @@ fun QqfmApp(viewModel: GalleryViewModel = viewModel()) {
     BackHandler(enabled = showAbout) { showAbout = false }
     BackHandler(enabled = !showAbout && start != null) { viewerId = null }
 
-    when {
-        showAbout -> AboutScreen(
-            cleanedFiles = state.cleanedFiles,
-            cleanedBytes = state.cleanedBytes,
-            onClose = { showAbout = false },
-        )
-        start != null -> ViewerScreen(
-            items = items,
-            start = start,
-            imageStore = viewModel.imageStore,
-            frozenIds = state.frozen,
-            onClose = { viewerId = null },
-            onDelete = { item, index ->
-                viewerAnchor = index
-                viewModel.deleteOne(item)
-            },
-            onToggleFrozen = { viewModel.toggleFrozen(it.id) },
-        )
-        else -> GalleryScreen(
-            state = state,
-            viewModel = viewModel,
-            gridState = gridState,
-            onOpen = { viewerId = it.id },
-            onOpenAbout = { showAbout = true },
-        )
+    Box(Modifier.fillMaxSize()) {
+        if (showAbout) {
+            AboutScreen(
+                cleanedFiles = state.cleanedFiles,
+                cleanedBytes = state.cleanedBytes,
+                onClose = { showAbout = false },
+            )
+        } else {
+            // The gallery stays composed underneath the viewer on purpose: swapping
+            // the two would drop every grid cell, and coming back would restart their
+            // thumbnail loads, showing a wave of spinners over images already decoded.
+            GalleryScreen(
+                state = state,
+                viewModel = viewModel,
+                gridState = gridState,
+                onOpen = { viewerId = it.id },
+                onOpenAbout = { showAbout = true },
+            )
+
+            if (start != null) {
+                ViewerScreen(
+                    items = items,
+                    start = start,
+                    imageStore = viewModel.imageStore,
+                    frozenIds = state.frozen,
+                    onClose = { viewerId = null },
+                    onDelete = { item, index ->
+                        viewerAnchor = index
+                        viewModel.deleteOne(item)
+                    },
+                    onToggleFrozen = { viewModel.toggleFrozen(it.id) },
+                )
+            }
+        }
     }
 }
