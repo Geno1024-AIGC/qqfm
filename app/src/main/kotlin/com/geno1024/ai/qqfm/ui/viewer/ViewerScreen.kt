@@ -3,7 +3,10 @@ package com.geno1024.ai.qqfm.ui.viewer
 import android.graphics.Bitmap
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -36,7 +39,10 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import com.geno1024.ai.qqfm.data.ImageStore
@@ -52,7 +58,7 @@ fun ViewerScreen(
     start: MediaItem,
     imageStore: ImageStore,
     onClose: () -> Unit,
-    onDelete: (MediaItem) -> Unit,
+    onDelete: (MediaItem, Int) -> Unit,
 ) {
     val startPage = remember(start.id) {
         items.indexOfFirst { it.id == start.id }.coerceAtLeast(0)
@@ -94,14 +100,14 @@ fun ViewerScreen(
                     }
                 },
                 actions = {
-                    IconButton(
-                        onClick = {
-                            val item = items.getOrNull(pagerState.currentPage) ?: return@IconButton
-                            deleting = true
-                            onDelete(item)
-                        },
-                        enabled = !deleting,
-                    ) {
+IconButton(
+                    onClick = {
+                        val item = items.getOrNull(pagerState.currentPage) ?: return@IconButton
+                        deleting = true
+                        onDelete(item, pagerState.currentPage)
+                    },
+                    enabled = !deleting,
+                ) {
                         Icon(Icons.Filled.Delete, contentDescription = "删除")
                     }
                 },
@@ -128,9 +134,9 @@ fun ViewerScreen(
                         contentScale = ContentScale.Fit,
                         modifier = Modifier
                             .fillMaxSize()
-                            .pointerInput(page) {
-                                detectTransformGestures { _, pan, zoom, _ ->
-                                    scale = (scale * zoom).coerceIn(1f, 5f)
+                            .pointerInput(Unit) {
+                                detectPinchToZoom { zoom, pan ->
+                                    scale = (scale * zoom).coerceIn(1f, MAX_SCALE)
                                     if (scale > 1.01f) {
                                         offsetX += pan.x
                                         offsetY += pan.y
@@ -184,3 +190,29 @@ fun ViewerScreen(
 /** The item's path relative to the chat picture root, e.g. `chatimg/000/Cache_...`. */
 private fun relativePath(item: MediaItem): String =
     item.path.removePrefix(MediaPaths.ROOT).removePrefix("/")
+
+/**
+ * Pinch to zoom and two-finger pan.
+ *
+ * The stock transform detector consumes single-pointer drags too, which would
+ * swallow the pager's swipe and leave the viewer with no way to reach the next
+ * image. This waits for a second finger first and leaves one-finger events
+ * untouched, so swiping still pages.
+ */
+private suspend fun PointerInputScope.detectPinchToZoom(onTransform: (zoom: Float, pan: Offset) -> Unit) {
+    awaitEachGesture {
+        awaitFirstDown(requireUnconsumed = false)
+        do {
+            val event = awaitPointerEvent()
+            if (event.changes.any { it.isConsumed }) continue
+            if (event.changes.count { it.pressed } < 2) continue
+            val zoom = event.calculateZoom()
+            val pan = event.calculatePan()
+            if (zoom == 1f && pan == Offset.Zero) continue
+            onTransform(zoom, pan)
+            event.changes.forEach { if (it.positionChanged()) it.consume() }
+        } while (event.changes.any { it.pressed })
+    }
+}
+
+private const val MAX_SCALE = 5f

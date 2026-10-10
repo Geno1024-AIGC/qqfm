@@ -18,15 +18,21 @@ import com.geno1024.ai.qqfm.ui.viewer.ViewerScreen
 fun QqfmApp(viewModel: GalleryViewModel = viewModel()) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     var viewerId by remember { mutableStateOf<String?>(null) }
+    var viewerAnchor by remember { mutableStateOf<Int?>(null) }
     var showUpdates by remember { mutableStateOf(false) }
 
     val items = state.items
     val start = viewerId?.let { id -> items.firstOrNull { it.id == id } }
 
-    // A file deleted in the viewer drops out of the items list; fall back to the
-    // gallery once the viewed item is gone.
+    // Deleting the image on screen drops it out of the items list. Rather than
+    // closing, the viewer slides onto whatever took its place, which is the next
+    // image in the current sort order.
     LaunchedEffect(viewerId, items) {
-        if (viewerId != null && items.none { it.id == viewerId }) viewerId = null
+        if (viewerId == null || items.any { it.id == viewerId }) return@LaunchedEffect
+        val anchor = viewerAnchor
+        viewerAnchor = null
+        viewerId = items.getOrNull(anchor ?: 0)?.id
+            ?: items.lastOrNull()?.id
     }
 
     // The system back button mirrors the in-app back arrows: it closes the viewer
@@ -41,7 +47,10 @@ fun QqfmApp(viewModel: GalleryViewModel = viewModel()) {
             start = start,
             imageStore = viewModel.imageStore,
             onClose = { viewerId = null },
-            onDelete = viewModel::deleteOne,
+            onDelete = { item, index ->
+                viewerAnchor = index
+                viewModel.deleteOne(item)
+            },
         )
         else -> GalleryScreen(
             state = state,

@@ -262,7 +262,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                     selection = emptySet(),
                     selectionBytes = 0L,
                     busy = false,
-                    message = "已删除 ${result.filesRemoved} 个文件，释放约 " +
+                    message = "已删除 ${result.filesRemoved} 张图片，释放约 " +
                         formatBytes(result.bytesReclaimed),
                 ).withRows()
             }
@@ -286,7 +286,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                     selection = it.selection - item.id,
                     selectionBytes = bytesOf(it.selection - item.id),
                     busy = false,
-                    message = "已删除 ${result.filesRemoved} 个文件，释放约 " +
+                    message = "已删除 ${result.filesRemoved} 张图片，释放约 " +
                         formatBytes(result.bytesReclaimed),
                 ).withRows()
             }

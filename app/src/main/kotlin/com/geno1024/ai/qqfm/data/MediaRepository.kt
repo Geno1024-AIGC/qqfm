@@ -91,17 +91,33 @@ class MediaRepository(private val context: Context) {
     /**
      * Deletes every on-disk variant of the given bases. Callers pass the gallery
      * items; each one expands to `chatimg`/`chatraw`/`chatthumb` files.
+     *
+     * Only the files that are actually there are counted: NTQQ names a file after
+     * `crc64("<tree>:<md5>")`, so three of the four variants normally miss, and
+     * reporting the candidate count would tell the user four files went away when
+     * one did.
      */
     fun delete(items: List<MediaItem>, onProgress: (Int) -> Unit = {}): DeleteResult {
         if (items.isEmpty()) return DeleteResult(0, 0L)
-        val allPaths = items.flatMap { MediaPaths.variants(it.base) }
-        val batches = allPaths.chunked(128)
-        var removed = 0
-        batches.forEachIndexed { index, batch ->
+        val candidates = items.flatMap { MediaPaths.variants(it.base) }
+        val batches = candidates.chunked(128)
+        val present = HashSet<String>(candidates.size)
+        var done = 0
+        batches.forEach { batch ->
             val args = batch.joinToString(" ") { RootShell.shellQuote(it) }
-            if (RootShell.exec("rm -f -- $args").ok) removed += batch.size
-            onProgress(index + 1)
+            RootShell.forEachLine(
+                "for p in $args; do [ -f \"\$p\" ] && printf '%s\\n' \"\$p\"; done 2>/dev/null",
+            ) { line -> present.add(line) }
+            done++
+            onProgress(done)
         }
-        return DeleteResult(removed, items.sumOf { it.size })
+        if (present.isEmpty()) return DeleteResult(0, 0L)
+
+        present.chunked(128).forEach { batch ->
+            val args = batch.joinToString(" ") { RootShell.shellQuote(it) }
+            RootShell.exec("rm -f -- $args")
+        }
+        val reclaimed = items.filter { it.path in present }.sumOf { it.size }
+        return DeleteResult(present.size, reclaimed)
     }
 }
