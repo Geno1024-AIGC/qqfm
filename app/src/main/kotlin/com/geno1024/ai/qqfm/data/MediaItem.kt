@@ -1,22 +1,36 @@
 package com.geno1024.ai.qqfm.data
 
 /**
- * One entry of the chat picture cache. QQ stores three parallel trees keyed by
- * the same base id: `chatimg` (displayable), `chatraw` (originals) and
- * `chatthumb` (thumbnails, with an additional `_hd` variant). The gallery is
- * built from `chatimg`; the other trees are only touched when deleting.
+ * One entry of QQ's picture cache.
+ *
+ * The user browses one tree at a time: NTQQ names a file after
+ * `crc64("<tree>:<md5>")`, so the same picture carries a different id in every
+ * tree and the trees cannot be matched by name.
  */
 data class MediaItem(
+    val source: MediaSource,
     val path: String,
     val base: String,
     val name: String,
     val size: Long,
     val mtime: Long,
 ) {
-    val id: String get() = base
+    /** Unique across trees, so a selection or a frozen pin never leaks into another. */
+    val id: String get() = "${source.id}/$base"
 
     /** Thumbnail candidate inside `chatthumb`, tried first when rendering. */
     val thumbnailPath: String get() = "${MediaPaths.THUMB_DIR}/Cache_${base}_hd"
+}
+
+/** The three trees under [MediaPaths.ROOT] that hold chat pictures. */
+enum class MediaSource(val id: String, val dir: String) {
+    IMG("chatimg", MediaPaths.IMG_DIR),
+    RAW("chatraw", MediaPaths.RAW_DIR),
+    THUMB("chatthumb", MediaPaths.THUMB_DIR);
+
+    companion object {
+        fun from(id: String?): MediaSource? = entries.firstOrNull { it.id == id }
+    }
 }
 
 object MediaPaths {

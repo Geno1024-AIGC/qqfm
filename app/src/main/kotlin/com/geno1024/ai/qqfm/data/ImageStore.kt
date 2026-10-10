@@ -30,7 +30,7 @@ class ImageStore(private val context: Context) {
     suspend fun full(item: MediaItem, targetPx: Int): Bitmap? = load(item, targetPx, "f$targetPx")
 
     private suspend fun load(item: MediaItem, targetPx: Int, bucket: String): Bitmap? {
-        val key = "${item.base}@$bucket"
+        val key = "${item.id}@$bucket"
         memory.get(key)?.let { return it }
 
         val disk = File(diskDir, "$key.jpg")

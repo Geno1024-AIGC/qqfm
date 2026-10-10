@@ -7,6 +7,7 @@ import com.geno1024.ai.qqfm.data.AppSettings
 import com.geno1024.ai.qqfm.data.ImageStore
 import com.geno1024.ai.qqfm.data.MediaItem
 import com.geno1024.ai.qqfm.data.MediaRepository
+import com.geno1024.ai.qqfm.data.MediaSource
 import com.geno1024.ai.qqfm.data.RootShell
 import com.geno1024.ai.qqfm.ui.formatBytes
 import kotlinx.coroutines.Dispatchers
@@ -44,6 +45,8 @@ data class GalleryUiState(
     val loading: Boolean = true,
     val scanning: Boolean = false,
     val scannedCount: Int = 0,
+    val source: MediaSource? = null,
+    val pickerVisible: Boolean = false,
     val items: List<MediaItem> = emptyList(),
     val totalBytes: Long = 0L,
     val sortMode: SortMode = SortMode.TIME_DESC,
@@ -77,8 +80,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             _state.update { it.copy(frozen = settings.frozenIds) }
             val root = withContext(Dispatchers.IO) { RootShell.isRootAvailable() }
-            _state.update { it.copy(rootAvailable = root) }
-            if (root) load(forceScan = false) else _state.update { it.copy(loading = false) }
+            _state.update { it.copy(rootAvailable = root, loading = false) }
         }
     }
 
@@ -86,34 +88,62 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             val root = withContext(Dispatchers.IO) { RootShell.isRootAvailable() }
             _state.update { it.copy(rootAvailable = root) }
-            if (root) load(forceScan = false)
         }
     }
+
+    /** Switches the browsed tree; the first choice is what the gallery opens with. */
+    fun chooseSource(source: MediaSource) {
+        val changed = _state.value.source != source
+        _state.update {
+            it.copy(
+                source = source,
+                pickerVisible = false,
+                collapsed = emptySet(),
+                selection = emptySet(),
+                selectionBytes = 0L,
+                message = null,
+                items = if (changed) emptyList() else it.items,
+                loading = changed,
+                scanning = false,
+                scannedCount = 0,
+                totalBytes = 0L,
+            )
+        }
+        endDrag()
+        rawItems = emptyList()
+        byId = emptyMap()
+        if (changed && _state.value.rootAvailable == true) load(forceScan = false)
+    }
+
+    fun openPicker() = _state.update { it.copy(pickerVisible = true) }
+
+    fun dismissPicker() = _state.update { it.copy(pickerVisible = false) }
 
     fun refresh() {
         if (_state.value.rootAvailable == true) load(forceScan = true)
     }
 
     private fun load(forceScan: Boolean) {
+        val source = _state.value.source ?: return
         viewModelScope.launch {
             _state.update { it.copy(loading = true, scanning = false, message = null) }
             val cached = if (forceScan) null
-            else withContext(Dispatchers.IO) { repository.loadCached() }
+            else withContext(Dispatchers.IO) { repository.loadCached(source) }
 
             if (cached != null) {
-                applyItems(cached, fromScan = false)
+                applyItems(source, cached, fromScan = false)
                 return@launch
             }
 
             _state.update { it.copy(scanning = true, scannedCount = 0) }
             val outcome = withContext(Dispatchers.IO) {
-                repository.scan { count -> _state.update { it.copy(scannedCount = count) } }
+                repository.scan(source) { count -> _state.update { it.copy(scannedCount = count) } }
             }
-            applyItems(outcome.items, fromScan = true)
+            applyItems(source, outcome.items, fromScan = true)
         }
     }
 
-    private fun applyItems(items: List<MediaItem>, fromScan: Boolean) {
+    private fun applyItems(source: MediaSource, items: List<MediaItem>, fromScan: Boolean) {
         rawItems = items
         byId = items.associateBy { it.id }
         _state.update {
@@ -217,13 +247,14 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         val snapshot = _state.value
         val selected = snapshot.items.filter { it.id in snapshot.selection }
         if (selected.isEmpty()) return
+        val source = snapshot.source ?: return
         viewModelScope.launch {
             _state.update { it.copy(busy = true) }
             val result = withContext(Dispatchers.IO) { repository.delete(selected) }
             val removed = selected.mapTo(HashSet()) { it.id }
             rawItems = rawItems.filterNot { it.id in removed }
             byId = rawItems.associateBy { it.id }
-            withContext(Dispatchers.IO) { repository.save(rawItems) }
+            withContext(Dispatchers.IO) { repository.save(source, rawItems) }
             _state.update {
                 it.copy(
                     items = sort(rawItems, it.sortMode),
@@ -241,12 +272,13 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     /** Deletes one item, as triggered from the viewer. */
     fun deleteOne(item: MediaItem) {
         if (item.id !in byId) return
+        val source = _state.value.source ?: return
         viewModelScope.launch {
             _state.update { it.copy(busy = true) }
             val result = withContext(Dispatchers.IO) { repository.delete(listOf(item)) }
             rawItems = rawItems.filterNot { it.id == item.id }
             byId = rawItems.associateBy { it.id }
-            withContext(Dispatchers.IO) { repository.save(rawItems) }
+            withContext(Dispatchers.IO) { repository.save(source, rawItems) }
             _state.update {
                 it.copy(
                     items = sort(rawItems, it.sortMode),

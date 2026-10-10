@@ -26,11 +26,11 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Done
-import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
@@ -46,12 +46,14 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -71,8 +73,11 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.geno1024.ai.qqfm.data.ImageStore
 import com.geno1024.ai.qqfm.data.MediaItem
+import com.geno1024.ai.qqfm.data.MediaSource
 import com.geno1024.ai.qqfm.ui.formatBytes
 import com.geno1024.ai.qqfm.ui.formatTimestamp
 
@@ -101,6 +106,7 @@ fun GalleryScreen(
         Box(Modifier.padding(padding).fillMaxSize()) {
             when {
                 state.rootAvailable == false -> RootPrompt(onRetry = viewModel::retryRoot)
+                state.source == null -> Unit
                 state.loading -> Centered { CircularProgressIndicator() }
                 state.scanning && state.items.isEmpty() -> Centered {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -114,6 +120,14 @@ fun GalleryScreen(
             if (state.scanning) {
                 LinearProgressIndicator(
                     modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth(),
+                )
+            }
+            if (state.source == null || state.pickerVisible) {
+                SourcePicker(
+                    current = state.source,
+                    onPick = viewModel::chooseSource,
+                    onDismiss = viewModel::dismissPicker,
+                    dismissible = state.pickerVisible,
                 )
             }
         }
@@ -132,13 +146,18 @@ private fun GalleryTopBar(
             if (state.selectionActive) {
                 Text("已选 ${state.selection.size} 项")
             } else {
-                Text("QQ 图片 · ${state.items.size}")
+                Text("${state.source?.id ?: "QQ 图片"} · ${state.items.size}")
             }
         },
         navigationIcon = {
             if (state.selectionActive) {
                 IconButton(onClick = viewModel::clearSelection) {
                     Icon(Icons.Filled.Close, contentDescription = "取消选择")
+                }
+            } else {
+                TextButton(onClick = viewModel::openPicker) {
+                    Text(state.source?.id ?: "选择目录")
+                    Icon(Icons.Filled.ArrowDropDown, contentDescription = "切换目录")
                 }
             }
         },
@@ -161,6 +180,53 @@ private fun GalleryTopBar(
             }
         },
     )
+}
+
+@Composable
+private fun SourcePicker(
+    current: MediaSource?,
+    onPick: (MediaSource) -> Unit,
+    onDismiss: () -> Unit,
+    dismissible: Boolean,
+) {
+    Dialog(
+        onDismissRequest = { if (dismissible) onDismiss() },
+        properties = DialogProperties(
+            dismissOnBackPress = dismissible,
+            dismissOnClickOutside = dismissible,
+        ),
+    ) {
+        Surface(
+            shape = MaterialTheme.shapes.large,
+            tonalElevation = 6.dp,
+        ) {
+            Column(modifier = Modifier.padding(vertical = 8.dp)) {
+                Text(
+                    text = "选择图片目录",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(start = 24.dp, end = 24.dp, top = 8.dp, bottom = 4.dp),
+                )
+                MediaSource.entries.forEach { source ->
+                    ListItem(
+                        headlineContent = { Text(source.id) },
+                        supportingContent = { Text(sourceHint(source)) },
+                        leadingContent = {
+                            if (source == current) {
+                                Icon(Icons.Filled.Check, contentDescription = null)
+                            }
+                        },
+                        modifier = Modifier.clickable { onPick(source) },
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun sourceHint(source: MediaSource): String = when (source) {
+    MediaSource.IMG -> "聊天窗口里展示的图片"
+    MediaSource.RAW -> "收到的原始图片"
+    MediaSource.THUMB -> "缩略图"
 }
 
 @Composable
