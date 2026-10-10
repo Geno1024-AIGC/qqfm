@@ -46,11 +46,13 @@ fun QqfmApp(viewModel: GalleryViewModel = viewModel()) {
             items = items,
             start = start,
             imageStore = viewModel.imageStore,
+            frozenIds = state.frozen,
             onClose = { viewerId = null },
             onDelete = { item, index ->
                 viewerAnchor = index
                 viewModel.deleteOne(item)
             },
+            onToggleFrozen = { viewModel.toggleFrozen(it.id) },
         )
         else -> GalleryScreen(
             state = state,

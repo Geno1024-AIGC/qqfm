@@ -12,16 +12,21 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -61,8 +66,10 @@ fun ViewerScreen(
     items: List<MediaItem>,
     start: MediaItem,
     imageStore: ImageStore,
+    frozenIds: Set<String>,
     onClose: () -> Unit,
     onDelete: (MediaItem, Int) -> Unit,
+    onToggleFrozen: (MediaItem) -> Unit,
 ) {
     val startPage = remember(start.id) {
         items.indexOfFirst { it.id == start.id }.coerceAtLeast(0)
@@ -89,6 +96,7 @@ fun ViewerScreen(
     }
 
     val currentId = items.getOrNull(pagerState.currentPage)?.id
+    val currentFrozen = currentId != null && currentId in frozenIds
     LaunchedEffect(currentId) {
         if (currentId != null) deleting = false
     }
@@ -119,6 +127,18 @@ fun ViewerScreen(
                     }
                 },
                 actions = {
+                    IconButton(
+                        onClick = {
+                            val item = items.getOrNull(pagerState.currentPage) ?: return@IconButton
+                            onToggleFrozen(item)
+                        },
+                    ) {
+                        Icon(
+                            imageVector = if (currentFrozen) Icons.Filled.Lock else Icons.Outlined.Lock,
+                            contentDescription = if (currentFrozen) "取消冻结" else "冻结",
+                            tint = if (currentFrozen) MaterialTheme.colorScheme.primary else LocalContentColor.current,
+                        )
+                    }
                     IconButton(
                         onClick = {
                             val item = items.getOrNull(pagerState.currentPage) ?: return@IconButton
@@ -178,6 +198,21 @@ fun ViewerScreen(
                         )
                     } else {
                         CircularProgressIndicator(color = Color.White)
+                    }
+
+                    if (item.id in frozenIds) {
+                        Icon(
+                            Icons.Filled.Lock,
+                            contentDescription = "已冻结",
+                            tint = Color.White,
+                            modifier = Modifier
+                                .align(Alignment.TopStart)
+                                .padding(12.dp)
+                                .clip(CircleShape)
+                                .background(Color.Black.copy(alpha = 0.4f))
+                                .padding(6.dp)
+                                .size(16.dp),
+                        )
                     }
 
                     Column(
