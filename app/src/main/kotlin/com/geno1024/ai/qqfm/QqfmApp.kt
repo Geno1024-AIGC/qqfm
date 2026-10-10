@@ -1,11 +1,13 @@
 package com.geno1024.ai.qqfm
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -25,6 +27,13 @@ fun QqfmApp(viewModel: GalleryViewModel = viewModel()) {
 
     val items = state.items
     val start = viewerId?.let { id -> items.firstOrNull { it.id == id } }
+
+    // Hoisted out of the gallery so opening an image does not throw the scroll
+    // position away with the composition: going back has to land where it left off.
+    // Keyed on the tree, so each directory remembers its own place.
+    val gridState = rememberSaveable(state.source?.id, saver = LazyGridState.Saver) {
+        LazyGridState()
+    }
 
     // Deleting the image on screen drops it out of the items list. Rather than
     // closing, the viewer slides onto whatever took its place, which is the next
@@ -66,6 +75,7 @@ fun QqfmApp(viewModel: GalleryViewModel = viewModel()) {
         else -> GalleryScreen(
             state = state,
             viewModel = viewModel,
+            gridState = gridState,
             onOpen = { viewerId = it.id },
             onOpenAbout = { showAbout = true },
         )

@@ -22,7 +22,6 @@ import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
-import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -86,6 +85,7 @@ import com.geno1024.ai.qqfm.ui.formatTimestamp
 fun GalleryScreen(
     state: GalleryUiState,
     viewModel: GalleryViewModel,
+    gridState: LazyGridState,
     onOpen: (MediaItem) -> Unit,
     onOpenAbout: () -> Unit,
 ) {
@@ -115,7 +115,7 @@ fun GalleryScreen(
                     }
                 }
                 state.items.isEmpty() -> Centered { Text("没有找到图片") }
-                else -> GalleryGrid(state, viewModel, onOpen)
+                else -> GalleryGrid(state, viewModel, gridState, onOpen)
             }
             if (state.scanning) {
                 LinearProgressIndicator(
@@ -279,9 +279,9 @@ private fun SelectionBar(state: GalleryUiState, viewModel: GalleryViewModel) {
 private fun GalleryGrid(
     state: GalleryUiState,
     viewModel: GalleryViewModel,
+    gridState: LazyGridState,
     onOpen: (MediaItem) -> Unit,
 ) {
-    val gridState: LazyGridState = rememberLazyGridState()
     val rows = state.displayRows
     LazyVerticalGrid(
         state = gridState,
