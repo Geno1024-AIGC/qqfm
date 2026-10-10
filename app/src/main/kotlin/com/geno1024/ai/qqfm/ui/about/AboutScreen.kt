@@ -1,7 +1,6 @@
 package com.geno1024.ai.qqfm.ui.about
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -32,6 +31,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.geno1024.ai.qqfm.BuildConfig
 import com.geno1024.ai.qqfm.ui.formatBytes
+import com.geno1024.ai.qqfm.ui.update.UpdatesSection
 
 /**
  * What this app is, which build it is, and what it has cleaned up so far.
@@ -46,7 +46,6 @@ fun AboutScreen(
     cleanedFiles: Long,
     cleanedBytes: Long,
     onClose: () -> Unit,
-    onOpenUpdates: () -> Unit,
 ) {
     Scaffold(
         topBar = {
@@ -135,22 +134,7 @@ fun AboutScreen(
 
             HorizontalDivider()
 
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .clickable(onClick = onOpenUpdates)
-                    .padding(vertical = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("检查升级", style = MaterialTheme.typography.bodyLarge)
-                Spacer(Modifier.weight(1f))
-                Text(
-                    text = "当前已是最新发布的版本时可在此手动检查",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+            UpdatesSection(modifier = Modifier.padding(bottom = 8.dp))
         }
     }
 }

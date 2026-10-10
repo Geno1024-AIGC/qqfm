@@ -14,7 +14,6 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.geno1024.ai.qqfm.ui.about.AboutScreen
 import com.geno1024.ai.qqfm.ui.gallery.GalleryScreen
 import com.geno1024.ai.qqfm.ui.gallery.GalleryViewModel
-import com.geno1024.ai.qqfm.ui.update.UpdatesScreen
 import com.geno1024.ai.qqfm.ui.viewer.ViewerScreen
 
 @Composable
@@ -22,7 +21,6 @@ fun QqfmApp(viewModel: GalleryViewModel = viewModel()) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     var viewerId by remember { mutableStateOf<String?>(null) }
     var viewerAnchor by remember { mutableStateOf<Int?>(null) }
-    var showUpdates by remember { mutableStateOf(false) }
     var showAbout by remember { mutableStateOf(false) }
 
     val items = state.items
@@ -47,18 +45,15 @@ fun QqfmApp(viewModel: GalleryViewModel = viewModel()) {
     }
 
     // The system back button mirrors the in-app back arrows: it closes the viewer
-    // and the pushed pages before ever reaching the gallery's default exit.
-    BackHandler(enabled = showUpdates) { showUpdates = false }
-    BackHandler(enabled = showAbout && !showUpdates) { showAbout = false }
-    BackHandler(enabled = !showUpdates && !showAbout && start != null) { viewerId = null }
+    // and the about page before ever reaching the gallery's default exit.
+    BackHandler(enabled = showAbout) { showAbout = false }
+    BackHandler(enabled = !showAbout && start != null) { viewerId = null }
 
     when {
-        showUpdates -> UpdatesScreen(onClose = { showUpdates = false })
         showAbout -> AboutScreen(
             cleanedFiles = state.cleanedFiles,
             cleanedBytes = state.cleanedBytes,
             onClose = { showAbout = false },
-            onOpenUpdates = { showUpdates = true },
         )
         start != null -> ViewerScreen(
             items = items,

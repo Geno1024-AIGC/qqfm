@@ -55,65 +55,41 @@ import kotlinx.coroutines.launch
  * Where newer builds are found, fetched from, and installed.
  *
  * The source is offered as a choice rather than a fallback because whether GitHub's
- * file hosts are reachable is a property of the network a person is on, not of the app.
+ * file hosts are reachable is a property of the network a person is on, not of the
+ * app. It lives inline on the about page rather than on a screen of its own, because
+ * checking for an update is one line of a page rather than a destination.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun UpdatesScreen(
-    onClose: () -> Unit,
+fun UpdatesSection(
+    modifier: Modifier = Modifier,
     viewModel: UpdateViewModel = viewModel(),
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
 
-    // Checking has to be asked for again from here, or the screen would show a stale
-    // answer while looking like it had just looked.
+    // Checking has to be asked for again from here, or the section would show a
+    // stale answer while looking like it had just looked.
     LaunchedEffect(Unit) {
         viewModel.recheckIfStale()
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.update_title)) },
-                navigationIcon = {
-                    IconButton(onClick = onClose) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.action_back))
-                    }
-                },
-            )
-        },
-    ) { padding ->
-        Column(
+    Column(modifier = modifier) {
+        Row(
             modifier = Modifier
-                .padding(padding)
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState()),
+                .fillMaxWidth()
+                .padding(start = 16.dp, end = 8.dp, top = 12.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                text = stringResource(R.string.update_current_version, BuildConfig.VERSION_NAME),
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp),
+                text = stringResource(R.string.update_title),
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.weight(1f),
             )
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = 16.dp, end = 8.dp, top = 12.dp, bottom = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = stringResource(R.string.update_title),
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.weight(1f),
-                )
-                TextButton(onClick = viewModel::check, enabled = !state.checking) {
-                    Text(stringResource(R.string.action_check_update))
-                }
+            TextButton(onClick = viewModel::check, enabled = !state.checking) {
+                Text(stringResource(R.string.action_check_update))
             }
-            UpdatePanel(viewModel = viewModel)
         }
+        UpdatePanel(viewModel = viewModel)
     }
 }
 
