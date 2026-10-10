@@ -27,6 +27,19 @@ class AppSettings(private val settings: Settings) {
             removed = if (value == null) setOf(KEY_DISMISSED) else emptySet(),
         )
 
+    /**
+     * Base ids the user pinned so accidental multi-select never grabs them.
+     *
+     * Stored as one comma-joined string; base ids are hex so the separator is safe.
+     */
+    var frozenIds: Set<String>
+        get() = settings.string(KEY_FROZEN)
+            ?.split(',')
+            ?.filter { it.isNotEmpty() }
+            ?.toSet()
+            ?: emptySet()
+        set(value) = settings.write(strings = mapOf(KEY_FROZEN to value.joinToString(",")))
+
     companion object {
         fun of(application: Application) = AppSettings(
             SharedPreferencesSettings(application.getSharedPreferences("qqfm", Application.MODE_PRIVATE)),
@@ -34,5 +47,6 @@ class AppSettings(private val settings: Settings) {
 
         const val KEY_SOURCE = "update.source"
         const val KEY_DISMISSED = "update.dismissed"
+        const val KEY_FROZEN = "gallery.frozen"
     }
 }

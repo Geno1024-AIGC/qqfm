@@ -3,11 +3,13 @@ package com.geno1024.ai.qqfm.ui.viewer
 import android.graphics.Bitmap
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
@@ -33,6 +35,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import com.geno1024.ai.qqfm.data.ImageStore
@@ -56,6 +60,14 @@ fun ViewerScreen(
     val pagerState = rememberPagerState(initialPage = startPage) { items.size }
 
     var deleting by remember { mutableStateOf(false) }
+
+    // Reset zoom when page changes
+    var scale by remember(start.id) { mutableFloatStateOf(1f) }
+    var offsetX by remember(start.id) { mutableFloatStateOf(0f) }
+    var offsetY by remember(start.id) { mutableFloatStateOf(0f) }
+    LaunchedEffect(pagerState.currentPage) {
+        scale = 1f; offsetX = 0f; offsetY = 0f
+    }
 
     LaunchedEffect(items.size) {
         if (items.isEmpty()) {
@@ -114,7 +126,28 @@ fun ViewerScreen(
                         bitmap = bmp.asImageBitmap(),
                         contentDescription = null,
                         contentScale = ContentScale.Fit,
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .pointerInput(page) {
+                                detectTransformGestures { _, pan, zoom, _ ->
+                                    scale = (scale * zoom).coerceIn(1f, 5f)
+                                    if (scale > 1.01f) {
+                                        offsetX += pan.x
+                                        offsetY += pan.y
+                                    } else {
+                                        offsetX = 0f
+                                        offsetY = 0f
+                                    }
+                                }
+                            }
+                            .then(
+                                Modifier.graphicsLayer(
+                                    scaleX = scale,
+                                    scaleY = scale,
+                                    translationX = offsetX,
+                                    translationY = offsetY,
+                                )
+                            ),
                     )
                 } else {
                     CircularProgressIndicator(color = Color.White)

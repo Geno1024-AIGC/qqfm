@@ -29,7 +29,7 @@ class MediaRepository(private val context: Context) {
                 if (parts.size == 3) {
                     val base = parts[0]
                     val size = parts[1].toLongOrNull() ?: return@forEachLine
-                    val mtime = parts[2].toLongOrNull() ?: return@forEachLine
+                    val mtime = (parts[2].toLongOrNull() ?: return@forEachLine) * 1000L
                     val name = "Cache_$base"
                     items.add(MediaItem("${MediaPaths.IMG_DIR}/$name", base, name, size, mtime))
                 }
@@ -55,7 +55,7 @@ class MediaRepository(private val context: Context) {
             if (firstTab <= 0 || lastTab <= firstTab) return@forEachLine
             val path = line.substring(0, firstTab)
             val size = line.substring(firstTab + 1, lastTab).toLongOrNull() ?: return@forEachLine
-            val mtime = line.substring(lastTab + 1).toLongOrNull() ?: return@forEachLine
+            val mtime = (line.substring(lastTab + 1).toLongOrNull() ?: return@forEachLine) * 1000L
             val name = path.substringAfterLast('/')
             if (!name.startsWith("Cache_")) return@forEachLine
             val base = name.removePrefix("Cache_")

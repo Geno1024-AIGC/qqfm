@@ -3,6 +3,7 @@ package com.geno1024.ai.qqfm.ui.gallery
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.geno1024.ai.qqfm.data.AppSettings
 import com.geno1024.ai.qqfm.data.ImageStore
 import com.geno1024.ai.qqfm.data.MediaItem
 import com.geno1024.ai.qqfm.data.MediaRepository
@@ -48,6 +49,7 @@ data class GalleryUiState(
     val sortMode: SortMode = SortMode.TIME_DESC,
     val collapsed: Set<String> = emptySet(),
     val displayRows: List<GalleryRow> = emptyList(),
+    val frozen: Set<String> = emptySet(),
     val selection: Set<String> = emptySet(),
     val selectionBytes: Long = 0L,
     val busy: Boolean = false,
@@ -59,6 +61,7 @@ data class GalleryUiState(
 class GalleryViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository = MediaRepository(application)
+    private val settings = AppSettings.of(application)
     val imageStore = ImageStore(application)
 
     private val _state = MutableStateFlow(GalleryUiState())
@@ -72,6 +75,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     init {
         viewModelScope.launch {
+            _state.update { it.copy(frozen = settings.frozenIds) }
             val root = withContext(Dispatchers.IO) { RootShell.isRootAvailable() }
             _state.update { it.copy(rootAvailable = root) }
             if (root) load(forceScan = false) else _state.update { it.copy(loading = false) }
@@ -144,6 +148,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun toggleSelection(id: String) {
+        if (id in _state.value.frozen) return
         _state.update {
             val next = it.selection.toMutableSet()
             val active = if (!next.add(id)) {
@@ -161,14 +166,27 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     fun selectAll() = _state.update {
         it.copy(
-            selection = it.items.mapTo(HashSet()) { item -> item.id },
-            selectionBytes = it.totalBytes,
+            selection = it.items.filterNot { item -> item.id in it.frozen }
+                .mapTo(HashSet()) { item -> item.id },
+            selectionBytes = it.items.filterNot { item -> item.id in it.frozen }.sumOf { it.size },
         )
+    }
+
+    /** Pins or unpins an item so drag selection and select-all leave it alone. */
+    fun toggleFrozen(id: String) {
+        val now = _state.value.frozen
+        val next = if (id in now) now - id else now + id
+        settings.frozenIds = next
+        _state.update { state ->
+            val selection = if (id in next) state.selection - id else state.selection
+            state.copy(frozen = next, selection = selection, selectionBytes = bytesOf(selection))
+        }
     }
 
     fun beginDrag(index: Int) {
         val items = _state.value.items
         if (index !in items.indices) return
+        if (items[index].id in _state.value.frozen) return
         dragPinned = _state.value.selection
         dragAnchor = index
         updateDragSelection(dragPinned + items[index].id)
@@ -184,7 +202,10 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun updateDragSelection(selection: Set<String>) {
-        _state.update { it.copy(selection = selection, selectionBytes = bytesOf(selection)) }
+        _state.update { state ->
+            val picked = selection - state.frozen
+            state.copy(selection = picked, selectionBytes = bytesOf(picked))
+        }
     }
 
     fun endDrag() {

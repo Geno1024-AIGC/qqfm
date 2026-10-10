@@ -31,10 +31,13 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -260,9 +263,11 @@ private fun GalleryGrid(
                         item = item,
                         selected = item.id in state.selection,
                         selectionActive = state.selectionActive,
+                        frozen = item.id in state.frozen,
                         imageStore = viewModel.imageStore,
                         onClick = { onOpen(item) },
                         onToggleSelection = { viewModel.toggleSelection(item.id) },
+                        onToggleFrozen = { viewModel.toggleFrozen(item.id) },
                     )
                 }
             }
@@ -281,7 +286,7 @@ private fun GroupHeader(row: GalleryRow.Header, collapsed: Boolean, onClick: () 
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(
-                imageVector = if (collapsed) Icons.Filled.KeyboardArrowRight else Icons.Filled.KeyboardArrowDown,
+                imageVector = if (collapsed) Icons.AutoMirrored.Filled.KeyboardArrowRight else Icons.Filled.KeyboardArrowDown,
                 contentDescription = null,
                 modifier = Modifier.size(18.dp),
             )
@@ -310,9 +315,11 @@ private fun GridCell(
     item: MediaItem,
     selected: Boolean,
     selectionActive: Boolean,
+    frozen: Boolean,
     imageStore: ImageStore,
     onClick: () -> Unit,
     onToggleSelection: () -> Unit,
+    onToggleFrozen: () -> Unit,
 ) {
     val bitmap by produceState<Bitmap?>(initialValue = null, key1 = item.id) {
         value = imageStore.thumbnail(item, 320)
@@ -364,15 +371,45 @@ private fun GridCell(
             )
         }
 
+        if (frozen) {
+            Icon(
+                Icons.Filled.Lock,
+                contentDescription = null,
+                tint = Color.White,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(6.dp)
+                    .size(18.dp),
+            )
+        }
         if (selected) {
             Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)))
         }
-        if (selectionActive) {
+        if (selectionActive && !frozen) {
             SelectionBadge(
                 selected = selected,
                 onClick = onToggleSelection,
                 modifier = Modifier.align(Alignment.TopEnd).padding(6.dp),
             )
+        }
+        if (!selectionActive) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(6.dp)
+                    .size(20.dp)
+                    .clip(CircleShape)
+                    .background(Color.Black.copy(alpha = 0.35f))
+                    .clickable(onClick = onToggleFrozen),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    if (frozen) Icons.Filled.Lock else Icons.Outlined.Lock,
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.size(14.dp),
+                )
+            }
         }
     }
 }
