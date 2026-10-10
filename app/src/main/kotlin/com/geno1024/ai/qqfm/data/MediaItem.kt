@@ -19,7 +19,7 @@ data class MediaItem(
     val id: String get() = "${source.id}/$base"
 
     /** Thumbnail candidate inside `chatthumb`, tried first when rendering. */
-    val thumbnailPath: String get() = "${MediaPaths.THUMB_DIR}/Cache_${base}_hd"
+    val thumbnailPath: String get() = MediaPaths.pathIn(MediaPaths.THUMB_DIR, "Cache_${base}_hd")
 }
 
 /** The three trees under [MediaPaths.ROOT] that hold chat pictures. */
@@ -43,11 +43,30 @@ object MediaPaths {
     const val THUMB_DIR = "$ROOT/chatthumb"
     const val TEMP_DIR = "$ROOT/Temp"
 
-    /** Every on-disk file that belongs to [base], used when deleting. */
-    fun variants(base: String): List<String> = listOf(
-        "$IMG_DIR/Cache_$base",
-        "$RAW_DIR/Cache_$base",
-        "$THUMB_DIR/Cache_$base",
-        "$THUMB_DIR/Cache_${base}_hd",
-    )
+    /**
+     * Builds the real path of [name] inside [dir].
+     *
+     * QQ files do not sit directly in the tree: `chatimg/000/Cache_-19a3…` lands in
+     * the three-character bucket made of the last characters of its own name, which
+     * is what spreads 4k directories over the tree. The `_hd` suffix is added after
+     * the bucket was decided, so it has to come off again before reading the bucket.
+     */
+    fun pathIn(dir: String, name: String): String {
+        val stem = if (name.endsWith(HD_SUFFIX)) name.dropLast(HD_SUFFIX.length) else name
+        return "$dir/${stem.takeLast(3)}/$name"
+    }
+
+    /**
+     * Every on-disk file that belongs to [base], used when deleting.
+     *
+     * Under NTQQ the same picture gets a different name in each tree
+     * (`crc64("<tree>:<md5>")`), so only the browsed tree normally matches; this
+     * still sweeps the others for the older layout that named all three alike.
+     */
+    fun variants(base: String): List<String> =
+        listOf("Cache_$base", "Cache_${base}$HD_SUFFIX").flatMap { name ->
+            listOf(IMG_DIR, RAW_DIR, THUMB_DIR).map { dir -> pathIn(dir, name) }
+        }
+
+    private const val HD_SUFFIX = "_hd"
 }

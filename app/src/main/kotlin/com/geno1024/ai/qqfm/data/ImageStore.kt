@@ -60,7 +60,7 @@ class ImageStore(private val context: Context) {
     private fun readCandidates(item: MediaItem): ByteArray? {
         val candidates = listOf(
             item.thumbnailPath,
-            "${MediaPaths.THUMB_DIR}/Cache_${item.base}",
+            MediaPaths.pathIn(MediaPaths.THUMB_DIR, "Cache_${item.base}"),
             item.path,
         )
         for (path in candidates) {

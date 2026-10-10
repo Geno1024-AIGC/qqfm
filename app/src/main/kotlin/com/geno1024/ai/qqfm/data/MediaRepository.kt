@@ -99,7 +99,11 @@ class MediaRepository(private val context: Context) {
      */
     fun delete(items: List<MediaItem>, onProgress: (Int) -> Unit = {}): DeleteResult {
         if (items.isEmpty()) return DeleteResult(0, 0L)
-        val candidates = items.flatMap { MediaPaths.variants(it.base) }
+        // The scanned path is the one file known to exist, so it goes first; the
+        // derived variants only add the sibling trees of older QQ layouts.
+        val candidates = items.flatMap { item ->
+            listOf(item.path) + MediaPaths.variants(item.base)
+        }.distinct()
         val batches = candidates.chunked(128)
         val present = HashSet<String>(candidates.size)
         var done = 0

@@ -12,9 +12,9 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
@@ -29,17 +29,20 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
@@ -50,6 +53,7 @@ import com.geno1024.ai.qqfm.data.MediaItem
 import com.geno1024.ai.qqfm.data.MediaPaths
 import com.geno1024.ai.qqfm.ui.formatBytes
 import com.geno1024.ai.qqfm.ui.formatTimestamp
+import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -67,12 +71,13 @@ fun ViewerScreen(
 
     var deleting by remember { mutableStateOf(false) }
 
-    // Reset zoom when page changes
     var scale by remember(start.id) { mutableFloatStateOf(1f) }
     var offsetX by remember(start.id) { mutableFloatStateOf(0f) }
     var offsetY by remember(start.id) { mutableFloatStateOf(0f) }
     LaunchedEffect(pagerState.currentPage) {
-        scale = 1f; offsetX = 0f; offsetY = 0f
+        scale = 1f
+        offsetX = 0f
+        offsetY = 0f
     }
 
     LaunchedEffect(items.size) {
@@ -88,6 +93,20 @@ fun ViewerScreen(
         if (currentId != null) deleting = false
     }
 
+    // The snackbar lives in the gallery, which is not composed while the viewer is
+    // up, so a deletion reports its own count here instead of going unseen.
+    var notice by remember { mutableStateOf<String?>(null) }
+    var lastCount by remember { mutableIntStateOf(items.size) }
+    LaunchedEffect(items.size) {
+        val gone = lastCount - items.size
+        lastCount = items.size
+        if (gone > 0) {
+            notice = "已删除 $gone 张"
+            delay(1500)
+            notice = null
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -100,88 +119,106 @@ fun ViewerScreen(
                     }
                 },
                 actions = {
-IconButton(
-                    onClick = {
-                        val item = items.getOrNull(pagerState.currentPage) ?: return@IconButton
-                        deleting = true
-                        onDelete(item, pagerState.currentPage)
-                    },
-                    enabled = !deleting,
-                ) {
+                    IconButton(
+                        onClick = {
+                            val item = items.getOrNull(pagerState.currentPage) ?: return@IconButton
+                            deleting = true
+                            onDelete(item, pagerState.currentPage)
+                        },
+                        enabled = !deleting,
+                    ) {
                         Icon(Icons.Filled.Delete, contentDescription = "删除")
                     }
                 },
             )
         },
     ) { padding ->
-        HorizontalPager(
-            state = pagerState,
+        Box(
             modifier = Modifier.padding(padding).fillMaxSize(),
-        ) { page ->
-            val item = items.getOrNull(page) ?: return@HorizontalPager
-            val bitmap by produceState<Bitmap?>(initialValue = null, key1 = item.id) {
-                value = imageStore.full(item, 2048)
-            }
-            Box(
-                modifier = Modifier.fillMaxSize().background(Color.Black),
-                contentAlignment = Alignment.Center,
-            ) {
-                val bmp = bitmap
-                if (bmp != null) {
-                    Image(
-                        bitmap = bmp.asImageBitmap(),
-                        contentDescription = null,
-                        contentScale = ContentScale.Fit,
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .pointerInput(Unit) {
-                                detectPinchToZoom { zoom, pan ->
-                                    scale = (scale * zoom).coerceIn(1f, MAX_SCALE)
-                                    if (scale > 1.01f) {
-                                        offsetX += pan.x
-                                        offsetY += pan.y
-                                    } else {
-                                        offsetX = 0f
-                                        offsetY = 0f
+            contentAlignment = Alignment.Center,
+        ) {
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier.fillMaxSize(),
+            ) { page ->
+                val item = items.getOrNull(page) ?: return@HorizontalPager
+                val bitmap by produceState<Bitmap?>(initialValue = null, key1 = item.id) {
+                    value = imageStore.full(item, 2048)
+                }
+                Box(
+                    modifier = Modifier.fillMaxSize().background(Color.Black),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    val bmp = bitmap
+                    if (bmp != null) {
+                        Image(
+                            bitmap = bmp.asImageBitmap(),
+                            contentDescription = null,
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .pointerInput(Unit) {
+                                    detectPinchToZoom { zoom, pan ->
+                                        scale = (scale * zoom).coerceIn(1f, MAX_SCALE)
+                                        if (scale > 1.01f) {
+                                            offsetX += pan.x
+                                            offsetY += pan.y
+                                        } else {
+                                            offsetX = 0f
+                                            offsetY = 0f
+                                        }
                                     }
                                 }
-                            }
-                            .then(
-                                Modifier.graphicsLayer(
-                                    scaleX = scale,
-                                    scaleY = scale,
-                                    translationX = offsetX,
-                                    translationY = offsetY,
-                                )
-                            ),
-                    )
-                } else {
-                    CircularProgressIndicator(color = Color.White)
-                }
-
-                Column(
-                    modifier = Modifier
-                        .align(Alignment.BottomStart)
-                        .fillMaxWidth()
-                        .background(
-                            Brush.verticalGradient(
-                                listOf(Color.Transparent, Color.Black.copy(alpha = 0.7f)),
-                            ),
+                                .graphicsLayer {
+                                    scaleX = scale
+                                    scaleY = scale
+                                    translationX = offsetX
+                                    translationY = offsetY
+                                },
                         )
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                ) {
-                    Text(
-                        text = relativePath(item),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = Color.White,
-                        maxLines = 1,
-                    )
-                    Text(
-                        text = "${formatBytes(item.size)} · ${formatTimestamp(item.mtime)}",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = Color.White.copy(alpha = 0.85f),
-                    )
+                    } else {
+                        CircularProgressIndicator(color = Color.White)
+                    }
+
+                    Column(
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .fillMaxWidth()
+                            .background(
+                                Brush.verticalGradient(
+                                    listOf(Color.Transparent, Color.Black.copy(alpha = 0.7f)),
+                                ),
+                            )
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                    ) {
+                        Text(
+                            text = relativePath(item),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = Color.White,
+                            maxLines = 1,
+                        )
+                        Text(
+                            text = "${formatBytes(item.size)} · ${formatTimestamp(item.mtime)}",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = Color.White.copy(alpha = 0.85f),
+                        )
+                    }
                 }
+            }
+
+            val text = notice
+            if (text != null) {
+                Text(
+                    text = text,
+                    style = MaterialTheme.typography.labelLarge,
+                    color = Color.White,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 84.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(Color.Black.copy(alpha = 0.7f))
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                )
             }
         }
     }
@@ -194,12 +231,14 @@ private fun relativePath(item: MediaItem): String =
 /**
  * Pinch to zoom and two-finger pan.
  *
- * The stock transform detector consumes single-pointer drags too, which would
+ * The stock transform detector consumes single-pointer drags as well, which would
  * swallow the pager's swipe and leave the viewer with no way to reach the next
- * image. This waits for a second finger first and leaves one-finger events
- * untouched, so swiping still pages.
+ * image. This one waits for a second finger and leaves one-finger events untouched,
+ * so swiping still pages.
  */
-private suspend fun PointerInputScope.detectPinchToZoom(onTransform: (zoom: Float, pan: Offset) -> Unit) {
+private suspend fun PointerInputScope.detectPinchToZoom(
+    onTransform: (zoom: Float, pan: Offset) -> Unit,
+) {
     awaitEachGesture {
         awaitFirstDown(requireUnconsumed = false)
         do {
