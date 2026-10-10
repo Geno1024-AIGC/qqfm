@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
@@ -30,6 +31,8 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
@@ -39,6 +42,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -57,6 +61,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
@@ -65,13 +70,15 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.geno1024.ai.qqfm.data.ImageStore
 import com.geno1024.ai.qqfm.data.MediaItem
+import com.geno1024.ai.qqfm.ui.formatBytes
+import com.geno1024.ai.qqfm.ui.formatTimestamp
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun GalleryScreen(
     state: GalleryUiState,
     viewModel: GalleryViewModel,
-    onOpen: (Int) -> Unit,
+    onOpen: (MediaItem) -> Unit,
     onOpenUpdates: () -> Unit,
 ) {
     val snackbarHostState = remember { SnackbarHostState() }
@@ -92,10 +99,19 @@ fun GalleryScreen(
             when {
                 state.rootAvailable == false -> RootPrompt(onRetry = viewModel::retryRoot)
                 state.loading -> Centered { CircularProgressIndicator() }
-                state.scanning && state.items.isEmpty() ->
-                    Centered { Text("正在扫描… 已发现 ${state.scannedCount} 张") }
+                state.scanning && state.items.isEmpty() -> Centered {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("正在扫描…")
+                        Text("已发现 ${state.scannedCount} 张")
+                    }
+                }
                 state.items.isEmpty() -> Centered { Text("没有找到图片") }
                 else -> GalleryGrid(state, viewModel, onOpen)
+            }
+            if (state.scanning) {
+                LinearProgressIndicator(
+                    modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth(),
+                )
             }
         }
     }
@@ -194,12 +210,13 @@ private fun SelectionBar(state: GalleryUiState, viewModel: GalleryViewModel) {
 private fun GalleryGrid(
     state: GalleryUiState,
     viewModel: GalleryViewModel,
-    onOpen: (Int) -> Unit,
+    onOpen: (MediaItem) -> Unit,
 ) {
     val gridState: LazyGridState = rememberLazyGridState()
+    val rows = state.displayRows
     LazyVerticalGrid(
         state = gridState,
-        columns = GridCells.Adaptive(minSize = 108.dp),
+        columns = GridCells.Fixed(4),
         contentPadding = PaddingValues(3.dp),
         horizontalArrangement = Arrangement.spacedBy(3.dp),
         verticalArrangement = Arrangement.spacedBy(3.dp),
@@ -208,26 +225,81 @@ private fun GalleryGrid(
             .pointerInput(Unit) {
                 detectDragGesturesAfterLongPress(
                     onDragStart = { position ->
-                        gridState.indexAt(position)?.let(viewModel::beginDrag)
+                        gridState.itemIndex(position, rows)?.let(viewModel::beginDrag)
                     },
                     onDrag = { change, _ ->
                         change.consume()
-                        gridState.indexAt(change.position)?.let(viewModel::extendDrag)
+                        gridState.itemIndex(change.position, rows)?.let(viewModel::extendDrag)
                     },
                     onDragEnd = viewModel::endDrag,
                     onDragCancel = viewModel::endDrag,
                 )
             },
     ) {
-        itemsIndexed(state.items, key = { _, item -> item.id }) { index, item ->
-            GridCell(
-                item = item,
-                selected = item.id in state.selection,
-                selectionActive = state.selectionActive,
-                imageStore = viewModel.imageStore,
-                onClick = {
-                    if (state.selectionActive) viewModel.toggleSelection(item.id) else onOpen(index)
-                },
+        itemsIndexed(
+            items = rows,
+            key = { _, row ->
+                when (row) {
+                    is GalleryRow.Header -> "h:${row.key}"
+                    is GalleryRow.Item -> "i:${state.items[row.index].id}"
+                }
+            },
+            span = { _, row ->
+                if (row is GalleryRow.Header) GridItemSpan(maxLineSpan) else GridItemSpan(1)
+            },
+        ) { _, row ->
+            when (row) {
+                is GalleryRow.Header -> GroupHeader(
+                    row = row,
+                    collapsed = row.key in state.collapsed,
+                    onClick = { viewModel.toggleCollapse(row.key) },
+                )
+                is GalleryRow.Item -> {
+                    val item = state.items[row.index]
+                    GridCell(
+                        item = item,
+                        selected = item.id in state.selection,
+                        selectionActive = state.selectionActive,
+                        imageStore = viewModel.imageStore,
+                        onClick = { onOpen(item) },
+                        onToggleSelection = { viewModel.toggleSelection(item.id) },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun GroupHeader(row: GalleryRow.Header, collapsed: Boolean, onClick: () -> Unit) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = if (collapsed) Icons.Filled.KeyboardArrowRight else Icons.Filled.KeyboardArrowDown,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp),
+            )
+            Text(
+                text = row.label,
+                style = MaterialTheme.typography.labelLarge,
+                modifier = Modifier.padding(start = 4.dp),
+            )
+            Text(
+                text = " ${row.count}",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.weight(1f))
+            Text(
+                text = formatBytes(row.bytes),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }
@@ -240,6 +312,7 @@ private fun GridCell(
     selectionActive: Boolean,
     imageStore: ImageStore,
     onClick: () -> Unit,
+    onToggleSelection: () -> Unit,
 ) {
     val bitmap by produceState<Bitmap?>(initialValue = null, key1 = item.id) {
         value = imageStore.thumbnail(item, 320)
@@ -265,22 +338,53 @@ private fun GridCell(
                 strokeWidth = 2.dp,
             )
         }
+
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .fillMaxWidth()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(Color.Transparent, Color.Black.copy(alpha = 0.65f)),
+                    ),
+                )
+                .padding(horizontal = 4.dp, vertical = 3.dp),
+        ) {
+            Text(
+                text = formatBytes(item.size),
+                style = MaterialTheme.typography.labelSmall,
+                color = Color.White,
+                maxLines = 1,
+            )
+            Text(
+                text = formatTimestamp(item.mtime, short = true),
+                style = MaterialTheme.typography.labelSmall,
+                color = Color.White.copy(alpha = 0.85f),
+                maxLines = 1,
+            )
+        }
+
         if (selected) {
             Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)))
         }
         if (selectionActive) {
-            SelectionBadge(selected, Modifier.align(Alignment.TopEnd).padding(6.dp))
+            SelectionBadge(
+                selected = selected,
+                onClick = onToggleSelection,
+                modifier = Modifier.align(Alignment.TopEnd).padding(6.dp),
+            )
         }
     }
 }
 
 @Composable
-private fun SelectionBadge(selected: Boolean, modifier: Modifier = Modifier) {
+private fun SelectionBadge(selected: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
     Box(
         modifier = modifier
             .size(22.dp)
             .clip(CircleShape)
-            .background(if (selected) MaterialTheme.colorScheme.primary else Color.Black.copy(alpha = 0.35f)),
+            .background(if (selected) MaterialTheme.colorScheme.primary else Color.Black.copy(alpha = 0.35f))
+            .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         if (selected) {
@@ -323,16 +427,11 @@ private fun Centered(content: @Composable () -> Unit) {
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { content() }
 }
 
-private fun LazyGridState.indexAt(position: Offset): Int? =
-    layoutInfo.visibleItemsInfo.firstOrNull { info ->
+/** Maps a pointer position to the index of the item it lands on, ignoring headers. */
+private fun LazyGridState.itemIndex(position: Offset, rows: List<GalleryRow>): Int? {
+    val row = layoutInfo.visibleItemsInfo.firstOrNull { info ->
         position.x >= info.offset.x && position.x < info.offset.x + info.size.width &&
             position.y >= info.offset.y && position.y < info.offset.y + info.size.height
-    }?.index
-
-private fun sortLabel(mode: SortMode): String = when (mode) {
-    SortMode.TIME_DESC -> "时间（新 → 旧）"
-    SortMode.TIME_ASC -> "时间（旧 → 新）"
-    SortMode.SIZE_DESC -> "大小（大 → 小）"
-    SortMode.SIZE_ASC -> "大小（小 → 大）"
-    SortMode.NAME -> "名称"
+    }?.index ?: return null
+    return (rows.getOrNull(row) as? GalleryRow.Item)?.index
 }
