@@ -265,8 +265,15 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     fun deleteSelected() {
         val snapshot = _state.value
-        val selected = snapshot.items.filter { it.id in snapshot.selection }
-        if (selected.isEmpty()) return
+        // Frozen items can never enter the selection, but the rule is enforced here
+        // too: unlocking is the only way past it, whatever called this.
+        val selected = snapshot.items.filter { it.id in snapshot.selection && it.id !in snapshot.frozen }
+        if (selected.isEmpty()) {
+            if (snapshot.selection.isNotEmpty()) {
+                _state.update { it.copy(message = "冻结的图片要先解锁才能删除") }
+            }
+            return
+        }
         val source = snapshot.source ?: return
         viewModelScope.launch {
             _state.update { it.copy(busy = true) }
@@ -293,6 +300,10 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     /** Deletes one item, as triggered from the viewer. */
     fun deleteOne(item: MediaItem) {
         if (item.id !in byId) return
+        if (item.id in _state.value.frozen) {
+            _state.update { it.copy(message = "冻结的图片要先解锁才能删除") }
+            return
+        }
         val source = _state.value.source ?: return
         viewModelScope.launch {
             _state.update { it.copy(busy = true) }

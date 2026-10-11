@@ -39,6 +39,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -59,6 +60,7 @@ import com.geno1024.ai.qqfm.data.MediaPaths
 import com.geno1024.ai.qqfm.ui.formatBytes
 import com.geno1024.ai.qqfm.ui.formatTimestamp
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -101,18 +103,23 @@ fun ViewerScreen(
         if (currentId != null) deleting = false
     }
 
-    // The snackbar lives in the gallery, which is not composed while the viewer is
-    // up, so a deletion reports its own count here instead of going unseen.
+    // The snackbar lives in the gallery, which sits behind the viewer, so anything
+    // the viewer needs to say it says itself.
+    val scope = rememberCoroutineScope()
     var notice by remember { mutableStateOf<String?>(null) }
+    fun showNotice(text: String) {
+        scope.launch {
+            notice = text
+            delay(1500)
+            if (notice == text) notice = null
+        }
+    }
+
     var lastCount by remember { mutableIntStateOf(items.size) }
     LaunchedEffect(items.size) {
         val gone = lastCount - items.size
         lastCount = items.size
-        if (gone > 0) {
-            notice = "已删除 $gone 张"
-            delay(1500)
-            notice = null
-        }
+        if (gone > 0) showNotice("已删除 $gone 张")
     }
 
     Scaffold(
@@ -142,12 +149,26 @@ fun ViewerScreen(
                     IconButton(
                         onClick = {
                             val item = items.getOrNull(pagerState.currentPage) ?: return@IconButton
+                            // A frozen image only goes away once it is unlocked, and
+                            // saying so beats a button that silently does nothing.
+                            if (item.id in frozenIds) {
+                                showNotice("这张已冻结，解锁后才能删除")
+                                return@IconButton
+                            }
                             deleting = true
                             onDelete(item, pagerState.currentPage)
                         },
                         enabled = !deleting,
                     ) {
-                        Icon(Icons.Filled.Delete, contentDescription = "删除")
+                        Icon(
+                            Icons.Filled.Delete,
+                            contentDescription = "删除",
+                            tint = if (currentFrozen) {
+                                LocalContentColor.current.copy(alpha = 0.35f)
+                            } else {
+                                LocalContentColor.current
+                            },
+                        )
                     }
                 },
             )
