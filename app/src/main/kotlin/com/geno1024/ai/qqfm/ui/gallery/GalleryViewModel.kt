@@ -56,6 +56,7 @@ data class GalleryUiState(
     val frozen: Set<String> = emptySet(),
     val cleanedFiles: Long = 0L,
     val cleanedBytes: Long = 0L,
+    val persistScanIndex: Boolean = true,
     val selection: Set<String> = emptySet(),
     val selectionBytes: Long = 0L,
     val busy: Boolean = false,
@@ -66,8 +67,8 @@ data class GalleryUiState(
 
 class GalleryViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val repository = MediaRepository(application)
     private val settings = AppSettings.of(application)
+    private val repository = MediaRepository(application) { settings.persistScanIndex }
     val imageStore = ImageStore(application)
 
     private val _state = MutableStateFlow(GalleryUiState())
@@ -86,6 +87,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                     frozen = settings.frozenIds,
                     cleanedFiles = settings.cleanedFiles,
                     cleanedBytes = settings.cleanedBytes,
+                    persistScanIndex = settings.persistScanIndex,
                 )
             }
             val root = withContext(Dispatchers.IO) { RootShell.isRootAvailable() }
@@ -355,6 +357,20 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         val displayRows: List<GalleryRow>,
         val totalBytes: Long,
     )
+
+    /**
+     * Turns the on-disk index on or off.
+     *
+     * Turning it off deletes what is already there rather than waiting for a scan to
+     * notice: the point of the setting is the space those files take.
+     */
+    fun setPersistScanIndex(enabled: Boolean) {
+        settings.persistScanIndex = enabled
+        _state.update { it.copy(persistScanIndex = enabled) }
+        if (!enabled) {
+            viewModelScope.launch(Dispatchers.IO) { repository.discardIndex() }
+        }
+    }
 
     /** Folds a finished deletion into the lifetime tally the about page shows. */
     private fun recordCleanup(result: com.geno1024.ai.qqfm.data.MediaRepository.DeleteResult) {

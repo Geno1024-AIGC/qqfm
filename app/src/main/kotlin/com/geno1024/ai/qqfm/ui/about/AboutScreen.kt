@@ -20,6 +20,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -34,7 +35,8 @@ import com.geno1024.ai.qqfm.ui.formatBytes
 import com.geno1024.ai.qqfm.ui.update.UpdatesSection
 
 /**
- * What this app is, which build it is, and what it has cleaned up so far.
+ * What this app is, which build it is, what it has cleaned up, and the one setting
+ * worth changing here.
  *
  * The tally is kept because it is the one number that says whether the thing is
  * worth having installed at all: the alternative, the free space on the phone, says
@@ -45,7 +47,9 @@ import com.geno1024.ai.qqfm.ui.update.UpdatesSection
 fun AboutScreen(
     cleanedFiles: Long,
     cleanedBytes: Long,
+    persistScanIndex: Boolean,
     onClose: () -> Unit,
+    onPersistScanIndexChange: (Boolean) -> Unit,
 ) {
     Scaffold(
         topBar = {
@@ -135,16 +139,29 @@ fun AboutScreen(
             HorizontalDivider()
 
             Text(
-                text = "安装包",
+                text = "图库",
                 style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.primary,
             )
-            Text(
-                text = "每次更新成功后，上一版留在「下载」和应用缓存里的 APK 会自动清掉，" +
-                    "以免每装一次就多占十几 MB。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("缓存扫描结果", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        text = "把扫到的文件列表存在应用缓存里（约 9 MB / 个目录），" +
+                            "下次打开图库直接读取。关掉后不再落盘，每次打开都会重新扫描。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Switch(
+                    checked = persistScanIndex,
+                    onCheckedChange = onPersistScanIndexChange,
+                )
+            }
 
             HorizontalDivider()
 

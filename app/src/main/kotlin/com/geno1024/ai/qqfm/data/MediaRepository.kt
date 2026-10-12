@@ -7,7 +7,11 @@ import java.io.File
  * Scans one of QQ's picture trees through root and keeps a compact on-disk cache
  * so a restart does not have to walk ~165k files again.
  */
-class MediaRepository(private val context: Context) {
+class MediaRepository(
+    private val context: Context,
+    /** Read each time, so turning the setting off takes effect without a restart. */
+    private val keepIndex: () -> Boolean = { true },
+) {
 
     data class ScanOutcome(
         val items: List<MediaItem>,
@@ -20,6 +24,7 @@ class MediaRepository(private val context: Context) {
 
     /** Loads the cached index if present; returns null when there is none. */
     fun loadCached(source: MediaSource): List<MediaItem>? {
+        if (!keepIndex()) return null
         val file = cacheFile(source)
         if (!file.exists() || file.length() == 0L) return null
         return runCatching {
@@ -56,7 +61,7 @@ class MediaRepository(private val context: Context) {
      * costs thirty-odd bytes and is applied the next time the index is read.
      */
     fun forgetInCache(source: MediaSource, ids: Set<String>) {
-        if (ids.isEmpty()) return
+        if (ids.isEmpty() || !keepIndex()) return
         runCatching {
             val file = removedFile(source)
             file.appendText(ids.joinToString(separator = "\n", postfix = "\n"))
@@ -77,6 +82,15 @@ class MediaRepository(private val context: Context) {
 
     private fun removedFile(source: MediaSource): File =
         File(context.cacheDir, "scan-${source.id}.removed")
+
+    /** Throws away the on-disk index for every tree, to give the space back at once. */
+    fun discardIndex() {
+        MediaSource.entries.forEach { source ->
+            runCatching { cacheFile(source).delete() }
+            runCatching { removedFile(source).delete() }
+            runCatching { File(context.cacheDir, "scan-${source.id}.tsv.tmp").delete() }
+        }
+    }
 
     /**
      * Walks [source] with `find` + `stat`. Missing and unreadable entries are
@@ -114,6 +128,7 @@ class MediaRepository(private val context: Context) {
 
     /** Rewrites the on-disk index from an in-memory list. */
     fun save(source: MediaSource, items: List<MediaItem>) {
+        if (!keepIndex()) return
         runCatching {
             val tmp = File(context.cacheDir, "scan-${source.id}.tsv.tmp")
             // A fresh scan is the whole truth, so the removals it covers are done with.

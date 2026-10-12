@@ -54,6 +54,17 @@ class AppSettings(private val settings: Settings) {
         get() = settings.string(KEY_CLEANED_BYTES)?.toLongOrNull() ?: 0L
         set(value) = settings.write(strings = mapOf(KEY_CLEANED_BYTES to value.toString()))
 
+    /**
+     * Whether the scan result is kept on disk between launches.
+     *
+     * On, the list is read straight from the file and the gallery opens at once; off,
+     * nothing is written and every visit walks the directory again. Defaults to on
+     * because the walk is tens of seconds over root and the file is a few megabytes.
+     */
+    var persistScanIndex: Boolean
+        get() = settings.string(KEY_PERSIST_INDEX)?.takeIf { it.isNotBlank() }?.toBooleanStrict() ?: true
+        set(value) = settings.write(strings = mapOf(KEY_PERSIST_INDEX to value.toString()))
+
     /** Adds one deletion to the tally. */
     fun recordCleanup(files: Long, bytes: Long) {
         val nextFiles = cleanedFiles + files
@@ -76,5 +87,6 @@ class AppSettings(private val settings: Settings) {
         const val KEY_FROZEN = "gallery.frozen"
         const val KEY_CLEANED_FILES = "cleanup.files"
         const val KEY_CLEANED_BYTES = "cleanup.bytes"
+        const val KEY_PERSIST_INDEX = "gallery.persistIndex"
     }
 }

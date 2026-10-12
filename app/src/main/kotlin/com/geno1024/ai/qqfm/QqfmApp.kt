@@ -60,7 +60,9 @@ fun QqfmApp(viewModel: GalleryViewModel = viewModel()) {
             AboutScreen(
                 cleanedFiles = state.cleanedFiles,
                 cleanedBytes = state.cleanedBytes,
+                persistScanIndex = state.persistScanIndex,
                 onClose = { showAbout = false },
+                onPersistScanIndexChange = viewModel::setPersistScanIndex,
             )
         } else {
             // The gallery stays composed underneath the viewer on purpose: swapping
