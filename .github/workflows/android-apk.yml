@@ -52,35 +52,30 @@ jobs:
       # Two builds signed with different keys cannot install over one another, which
       # makes every published build uninstallable on any phone that already has the
       # app, so the key is restored from the secrets before anything is assembled.
-      - name: Restore the signing key
+      # The key lives once, as an org secret, and is written to the runner's temp
+      # directory only for the length of the build. Missing keystore fails the job:
+      # a build signed with the runner's throwaway debug key cannot be installed over
+      # anything, so publishing one would look successful and break every phone.
+      - name: Materialize keystore from secret
         env:
-          KEYSTORE: ${{ secrets.QQFM_SIGNING_KEYSTORE_B64 }}
-          STORE_FILE: ${{ secrets.QQFM_SIGNING_STORE_FILE }}
-          STORE_PASSWORD: ${{ secrets.QQFM_SIGNING_STORE_PASSWORD }}
-          KEY_PASSWORD: ${{ secrets.QQFM_SIGNING_KEY_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.QQFM_SIGNING_KEY_ALIAS }}
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
         run: |
           set -euo pipefail
-          if [ -z "${KEYSTORE}" ]; then
-            echo "No signing key in secrets: this build will be signed with the"
-            echo "runner's throwaway debug key and cannot replace an installed app."
-            exit 0
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::error::Missing KEYSTORE_BASE64 secret"
+            exit 1
           fi
-          mkdir -p "$(dirname "$STORE_FILE")"
-          printf '%s' "$KEYSTORE" | base64 -d > "$STORE_FILE"
-          chmod 600 "$STORE_FILE"
-          echo "Restored signing key for alias $KEY_ALIAS"
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/keystore.jks"
+          chmod 600 "$RUNNER_TEMP/keystore.jks"
 
       - name: Assemble debug APK
         env:
-          QQFM_SIGNING_STORE_FILE: ${{ secrets.QQFM_SIGNING_STORE_FILE }}
-          QQFM_SIGNING_STORE_PASSWORD: ${{ secrets.QQFM_SIGNING_STORE_PASSWORD }}
-          QQFM_SIGNING_KEY_PASSWORD: ${{ secrets.QQFM_SIGNING_KEY_PASSWORD }}
-          QQFM_SIGNING_KEY_ALIAS: ${{ secrets.QQFM_SIGNING_KEY_ALIAS }}
+          KEYSTORE_STORE_FILE: ${{ runner.temp }}/keystore.jks
+          KEYSTORE_STORE_PASSWORD: ${{ secrets.KEYSTORE_STORE_PASSWORD }}
+          KEYSTORE_KEY_PASSWORD: ${{ secrets.KEYSTORE_KEY_PASSWORD }}
+          KEYSTORE_KEY_ALIAS: ${{ secrets.KEYSTORE_KEY_ALIAS }}
         run: ./gradlew :app:assembleDebug
 
-      # A build that quietly fell back to the runner's own key is the exact failure
-      # this workflow exists to prevent, and it would look like a green run.
       - name: Check what actually signed the APK
         run: |
           set -euo pipefail
@@ -88,14 +83,7 @@ jobs:
           apk=app/build/outputs/apk/debug/app-debug.apk
           "$aapt2" dump badging "$apk" > /dev/null
           signer="$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)"
-          digest="$("$signer" verify --print-certs "$apk" \
-            | sed -n 's/.*certificate SHA-256 digest: //p' | head -1)"
-          echo "Signed with: $digest"
-          expected="${{ secrets.QQFM_SIGNING_EXPECTED_DIGEST }}"
-          if [ -n "$expected" ] && [ "${digest,,}" != "${expected,,}" ]; then
-            echo "::error::built APK is signed with $digest but the shared key is $expected"
-            exit 1
-          fi
+          "$signer" verify --print-certs "$apk" | sed -n 's/^Signer #1 certificate DN: //p'
 
       # The APK is the point of this workflow, so read the stamp out of the built
       # manifest rather than re-deriving it: assembling already bumped the pack

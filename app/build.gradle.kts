@@ -1,5 +1,6 @@
 import com.geno1024.ai.qqfm.gradle.Versioning
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.util.Properties
 
 plugins {
     alias(libs.plugins.android.application)
@@ -7,6 +8,20 @@ plugins {
 }
 
 val stamp = Versioning.stamp(rootDir, projectDir)
+
+// ---- Signing: the org's shared key, from the environment (CI) or local.properties ----
+// Same names in every project, so no repository carries its own keystore settings.
+val keystoreProps = Properties().apply {
+    val local = File(rootProject.projectDir, "local.properties")
+    if (local.exists()) local.inputStream().use { load(it) }
+}
+fun secret(key: String, env: String): String? =
+    System.getenv(env)?.takeIf { it.isNotBlank() }
+        ?: keystoreProps.getProperty(key)?.takeIf { it.isNotBlank() }
+val releaseStoreFile = secret("keystore.file", "KEYSTORE_STORE_FILE")
+val releaseStorePassword = secret("keystore.storePassword", "KEYSTORE_STORE_PASSWORD")
+val releaseKeyPassword = secret("keystore.keyPassword", "KEYSTORE_KEY_PASSWORD") ?: releaseStorePassword
+val releaseKeyAlias = secret("keystore.keyAlias", "KEYSTORE_KEY_ALIAS") ?: "geno"
 
 android {
     namespace = "com.geno1024.ai.qqfm"
@@ -31,27 +46,16 @@ android {
     }
 
     // A build meant to replace an installed app has to carry the same signing key as
-    // that app, or the platform refuses it before the install even starts. The key is
-    // supplied by the environment rather than kept in the repository, and a build
-    // without one still works, it just cannot be installed over another one.
-    //
-    // GitHub Actions turns an unset secret into an empty variable rather than leaving
-    // it unset, so blank values have to count as absent or this configuration fails.
-    val signingKeyStore = providers.environmentVariable("QQFM_SIGNING_STORE_FILE")
-        .orElse(providers.gradleProperty("qqfm.signing.storeFile"))
-        .orNull
-        ?.takeIf { it.isNotBlank() }
-
+    // that app, or the platform refuses it before the install even starts. The key and
+    // its passwords come from the environment (CI) or local.properties (never
+    // committed); nothing about them is written here.
     signingConfigs {
-        if (signingKeyStore != null) {
+        if (releaseStoreFile != null && releaseStorePassword != null) {
             create("release") {
-                storeFile = file(signingKeyStore)
-                storePassword = providers.environmentVariable("QQFM_SIGNING_STORE_PASSWORD")
-                    .orNull?.takeIf { it.isNotBlank() }
-                keyAlias = providers.environmentVariable("QQFM_SIGNING_KEY_ALIAS")
-                    .orNull?.takeIf { it.isNotBlank() } ?: "qqfm"
-                keyPassword = providers.environmentVariable("QQFM_SIGNING_KEY_PASSWORD")
-                    .orNull?.takeIf { it.isNotBlank() }
+                storeFile = File(releaseStoreFile)
+                storePassword = releaseStorePassword
+                keyPassword = releaseKeyPassword
+                keyAlias = releaseKeyAlias
             }
         }
     }
@@ -59,16 +63,16 @@ android {
     buildTypes {
         debug {
             isMinifyEnabled = false
-            // The published build is the debug one, so the debug variant is the one that
-            // has to be signed with the shared key; without it this falls back to the
-            // machine-local debug key and no two builds can replace each other.
-            if (signingKeyStore != null) {
+            // The published build is the debug one, so the debug variant is the one
+            // that carries the shared key.
+            if (releaseStoreFile != null && releaseStorePassword != null) {
                 signingConfig = signingConfigs.getByName("release")
             }
         }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
+            signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
