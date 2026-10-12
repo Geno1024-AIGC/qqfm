@@ -134,6 +134,20 @@ fun AboutScreen(
 
             HorizontalDivider()
 
+            Text(
+                text = "安装包",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Text(
+                text = "每次更新成功后，上一版留在「下载」和应用缓存里的 APK 会自动清掉，" +
+                    "以免每装一次就多占十几 MB。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            HorizontalDivider()
+
             UpdatesSection(modifier = Modifier.padding(bottom = 8.dp))
         }
     }
