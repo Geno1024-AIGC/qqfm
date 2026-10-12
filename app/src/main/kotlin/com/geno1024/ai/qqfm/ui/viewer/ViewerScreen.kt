@@ -1,6 +1,7 @@
 package com.geno1024.ai.qqfm.ui.viewer
 
 import android.graphics.drawable.Animatable
+import android.os.SystemClock
 import android.widget.ImageView
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -54,6 +55,8 @@ import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.geno1024.ai.qqfm.data.ImageStore
@@ -86,10 +89,47 @@ fun ViewerScreen(
     var scale by remember(start.id) { mutableFloatStateOf(1f) }
     var offsetX by remember(start.id) { mutableFloatStateOf(0f) }
     var offsetY by remember(start.id) { mutableFloatStateOf(0f) }
+    var pageSize by remember { mutableStateOf(IntSize.Zero) }
     LaunchedEffect(pagerState.currentPage) {
         scale = 1f
         offsetX = 0f
         offsetY = 0f
+    }
+
+    /**
+     * Keeps the picture inside the frame.
+     *
+     * Scaled about its centre, so the free space on each side is half the extra
+     * width; without this a long screenshot pans straight out of the viewport.
+     */
+    fun clampPan() {
+        if (scale <= RESTING_SCALE) {
+            offsetX = 0f
+            offsetY = 0f
+            return
+        }
+        val maxX = pageSize.width * (scale - 1f) / 2f
+        val maxY = pageSize.height * (scale - 1f) / 2f
+        offsetX = offsetX.coerceIn(-maxX, maxX)
+        offsetY = offsetY.coerceIn(-maxY, maxY)
+    }
+
+    /** Double tap toggles between the whole picture and a closer look at the tap. */
+    fun toggleZoom(tap: Offset) {
+        if (scale > RESTING_SCALE) {
+            scale = 1f
+            offsetX = 0f
+            offsetY = 0f
+            return
+        }
+        val zoomed = DOUBLE_TAP_SCALE
+        val centre = Offset(pageSize.width / 2f, pageSize.height / 2f)
+        // Keep whatever was under the finger under the finger: the layer scales about
+        // the centre, so the offset has to absorb the difference.
+        offsetX += (tap.x - centre.x) * (scale - zoomed)
+        offsetY += (tap.y - centre.y) * (scale - zoomed)
+        scale = zoomed
+        clampPan()
     }
 
     LaunchedEffect(items.size) {
@@ -190,22 +230,30 @@ fun ViewerScreen(
                     value = imageStore.viewer(item, 2048)
                 }
                 Box(
-                    modifier = Modifier.fillMaxSize().background(Color.Black),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black)
+                        .onSizeChanged { pageSize = it },
                     contentAlignment = Alignment.Center,
                 ) {
                     val zoomModifier = Modifier
                         .fillMaxSize()
                         .pointerInput(Unit) {
-                            detectPinchToZoom { zoom, pan ->
-                                scale = (scale * zoom).coerceIn(1f, MAX_SCALE)
-                                if (scale > 1.01f) {
+                            detectImageGestures(
+                                canPan = { scale > RESTING_SCALE },
+                                onPinch = { zoom, pan ->
+                                    scale = (scale * zoom).coerceIn(1f, MAX_SCALE)
                                     offsetX += pan.x
                                     offsetY += pan.y
-                                } else {
-                                    offsetX = 0f
-                                    offsetY = 0f
-                                }
-                            }
+                                    clampPan()
+                                },
+                                onPan = { pan ->
+                                    offsetX += pan.x
+                                    offsetY += pan.y
+                                    clampPan()
+                                },
+                                onDoubleTap = ::toggleZoom,
+                            )
                         }
                         .graphicsLayer {
                             scaleX = scale
@@ -301,29 +349,64 @@ private fun relativePath(item: MediaItem): String =
     item.path.removePrefix(MediaPaths.ROOT).removePrefix("/")
 
 /**
- * Pinch to zoom and two-finger pan.
+ * Zoom, pan and double tap on one picture, while leaving page swipes alone.
  *
- * The stock transform detector consumes single-pointer drags as well, which would
- * swallow the pager's swipe and leave the viewer with no way to reach the next
- * image. This one waits for a second finger and leaves one-finger events untouched,
- * so swiping still pages.
+ * One finger has to mean two different things: a swipe that turns the page when the
+ * picture is shown as-is, and a drag that walks around it once it is zoomed in. The
+ * way out of the conflict is to consume the drag only when zoomed, because the pager
+ * is this node's ancestor and simply stops when a child eats the change.
  */
-private suspend fun PointerInputScope.detectPinchToZoom(
-    onTransform: (zoom: Float, pan: Offset) -> Unit,
+private suspend fun PointerInputScope.detectImageGestures(
+    canPan: () -> Boolean,
+    onPinch: (zoom: Float, pan: Offset) -> Unit,
+    onPan: (pan: Offset) -> Unit,
+    onDoubleTap: (position: Offset) -> Unit,
 ) {
+    var lastTapAt = 0L
     awaitEachGesture {
-        awaitFirstDown(requireUnconsumed = false)
+        val down = awaitFirstDown(requireUnconsumed = false)
+        var moved = false
         do {
             val event = awaitPointerEvent()
+            // Something closer to the root already took this gesture: the pager
+            // scrolling the page, for one. Letting go of it keeps both usable.
             if (event.changes.any { it.isConsumed }) continue
-            if (event.changes.count { it.pressed } < 2) continue
-            val zoom = event.calculateZoom()
-            val pan = event.calculatePan()
-            if (zoom == 1f && pan == Offset.Zero) continue
-            onTransform(zoom, pan)
-            event.changes.forEach { if (it.positionChanged()) it.consume() }
+            val pointers = event.changes.count { it.pressed }
+            when {
+                pointers >= 2 -> {
+                    val zoom = event.calculateZoom()
+                    val pan = event.calculatePan()
+                    if (zoom != 1f || pan != Offset.Zero) {
+                        moved = true
+                        onPinch(zoom, pan)
+                        event.changes.forEach { if (it.positionChanged()) it.consume() }
+                    }
+                }
+                canPan() -> {
+                    val pan = event.calculatePan()
+                    if (pan != Offset.Zero) {
+                        moved = true
+                        onPan(pan)
+                        event.changes.forEach { if (it.positionChanged()) it.consume() }
+                    }
+                }
+            }
         } while (event.changes.any { it.pressed })
+
+        if (!moved) {
+            val now = SystemClock.uptimeMillis()
+            if (now - lastTapAt < DOUBLE_TAP_MS) {
+                lastTapAt = 0L
+                onDoubleTap(down.position)
+            } else {
+                lastTapAt = now
+            }
+        }
     }
 }
 
+/** Below this the picture counts as shown as-is, and swipes belong to the pager. */
+private const val RESTING_SCALE = 1.01f
 private const val MAX_SCALE = 5f
+private const val DOUBLE_TAP_SCALE = 2.5f
+private const val DOUBLE_TAP_MS = 300L
