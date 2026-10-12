@@ -1,6 +1,7 @@
 package com.geno1024.ai.qqfm.ui.viewer
 
-import android.graphics.Bitmap
+import android.graphics.drawable.Animatable
+import android.widget.ImageView
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -54,7 +55,9 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import com.geno1024.ai.qqfm.data.ImageStore
+import com.geno1024.ai.qqfm.data.LoadedImage
 import com.geno1024.ai.qqfm.data.MediaItem
 import com.geno1024.ai.qqfm.data.MediaPaths
 import com.geno1024.ai.qqfm.ui.formatBytes
@@ -183,42 +186,55 @@ fun ViewerScreen(
                 modifier = Modifier.fillMaxSize(),
             ) { page ->
                 val item = items.getOrNull(page) ?: return@HorizontalPager
-                val bitmap by produceState<Bitmap?>(initialValue = null, key1 = item.id) {
-                    value = imageStore.full(item, 2048)
+                val loaded by produceState<LoadedImage?>(initialValue = null, key1 = item.id) {
+                    value = imageStore.viewer(item, 2048)
                 }
                 Box(
                     modifier = Modifier.fillMaxSize().background(Color.Black),
                     contentAlignment = Alignment.Center,
                 ) {
-                    val bmp = bitmap
-                    if (bmp != null) {
-                        Image(
-                            bitmap = bmp.asImageBitmap(),
+                    val zoomModifier = Modifier
+                        .fillMaxSize()
+                        .pointerInput(Unit) {
+                            detectPinchToZoom { zoom, pan ->
+                                scale = (scale * zoom).coerceIn(1f, MAX_SCALE)
+                                if (scale > 1.01f) {
+                                    offsetX += pan.x
+                                    offsetY += pan.y
+                                } else {
+                                    offsetX = 0f
+                                    offsetY = 0f
+                                }
+                            }
+                        }
+                        .graphicsLayer {
+                            scaleX = scale
+                            scaleY = scale
+                            translationX = offsetX
+                            translationY = offsetY
+                        }
+                    when (val image = loaded) {
+                        is LoadedImage.Still -> Image(
+                            bitmap = image.bitmap.asImageBitmap(),
                             contentDescription = null,
                             contentScale = ContentScale.Fit,
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .pointerInput(Unit) {
-                                    detectPinchToZoom { zoom, pan ->
-                                        scale = (scale * zoom).coerceIn(1f, MAX_SCALE)
-                                        if (scale > 1.01f) {
-                                            offsetX += pan.x
-                                            offsetY += pan.y
-                                        } else {
-                                            offsetX = 0f
-                                            offsetY = 0f
-                                        }
-                                    }
-                                }
-                                .graphicsLayer {
-                                    scaleX = scale
-                                    scaleY = scale
-                                    translationX = offsetX
-                                    translationY = offsetY
-                                },
+                            modifier = zoomModifier,
                         )
-                    } else {
-                        CircularProgressIndicator(color = Color.White)
+                        // An ImageView rather than a Compose painter, because that is
+                        // what keeps an AnimatedImageDrawable running and invalidating.
+                        is LoadedImage.Motion -> AndroidView(
+                            factory = { context ->
+                                ImageView(context).apply {
+                                    scaleType = ImageView.ScaleType.FIT_CENTER
+                                }
+                            },
+                            update = { view ->
+                                view.setImageDrawable(image.drawable)
+                                (image.drawable as? Animatable)?.start()
+                            },
+                            modifier = zoomModifier,
+                        )
+                        null -> CircularProgressIndicator(color = Color.White)
                     }
 
                     if (item.id in frozenIds) {

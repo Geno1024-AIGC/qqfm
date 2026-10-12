@@ -3,13 +3,26 @@ package com.geno1024.ai.qqfm.data
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.ImageDecoder
+import android.graphics.drawable.Animatable
+import android.graphics.drawable.Drawable
+import android.os.Build
 import android.util.LruCache
+import androidx.annotation.RequiresApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import java.nio.ByteBuffer
+import kotlin.math.max
+
+/** What the viewer draws: a still bitmap, or something that moves on its own. */
+sealed interface LoadedImage {
+    data class Still(val bitmap: Bitmap) : LoadedImage
+    data class Motion(val drawable: Drawable) : LoadedImage
+}
 
 /**
  * Loads downsampled bitmaps out of QQ's root-only cache. Reads are serialized by
@@ -27,7 +40,82 @@ class ImageStore(private val context: Context) {
 
     suspend fun thumbnail(item: MediaItem, targetPx: Int): Bitmap? = load(item, targetPx, "t$targetPx")
 
-    suspend fun full(item: MediaItem, targetPx: Int): Bitmap? = load(item, targetPx, "f$targetPx")
+    /**
+     * Decodes an image for the viewer, keeping motion when there is any.
+     *
+     * A still goes through the shared bitmap path, which downsamples and caches. An
+     * animation cannot: the cache holds flattened JPEGs, and a flattened JPEG is a
+     * single frame forever, so those are decoded fresh and left to animate in place.
+     */
+    suspend fun viewer(item: MediaItem, maxPx: Int): LoadedImage? {
+        if (item.size <= MAX_ANIMATION_BYTES && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val bytes = readViewerBytes(item)
+            if (bytes != null && looksAnimated(bytes)) {
+                decodeAnimated(bytes, maxPx)?.let { return LoadedImage.Motion(it) }
+            }
+        }
+        return load(item, maxPx, "f$maxPx")?.let { LoadedImage.Still(it) }
+    }
+
+    /** Reads the file itself first; the viewer wants this image, not its thumbnail. */
+    private suspend fun readViewerBytes(item: MediaItem): ByteArray? = withContext(Dispatchers.IO) {
+        semaphore.withPermit {
+            readAll(item.path) ?: readAll(item.thumbnailPath)
+        }
+    }
+
+    /** True for GIF, animated WebP and APNG; the formats QQ actually receives. */
+    private fun looksAnimated(bytes: ByteArray): Boolean {
+        if (bytes.size < 12) return false
+        if (startsWith(bytes, 0, "GIF8")) return true
+        // A WebP animation advertises itself with the extended "VP8X" chunk.
+        if (startsWith(bytes, 0, "RIFF") && startsWith(bytes, 8, "WEBP")) {
+            return contains(bytes, "VP8X")
+        }
+        // A PNG only moves if it carries an animation control chunk.
+        return startsWith(bytes, 1, "PNG") && contains(bytes, "acTL")
+    }
+
+    private fun startsWith(bytes: ByteArray, offset: Int, text: String): Boolean {
+        if (offset + text.length > bytes.size) return false
+        return text.indices.all { bytes[offset + it].toInt() and 0xFF == text[it].code }
+    }
+
+    private fun contains(bytes: ByteArray, text: String): Boolean {
+        val limit = minOf(bytes.size, HEADER_SCAN_LIMIT)
+        outer@ for (index in 0..limit - text.length) {
+            for (offset in text.indices) {
+                if (bytes[index + offset].toInt() and 0xFF != text[offset].code) continue@outer
+            }
+            return true
+        }
+        return false
+    }
+
+    @RequiresApi(Build.VERSION_CODES.P)
+    private fun decodeAnimated(bytes: ByteArray, maxPx: Int): Drawable? = runCatching {
+        // The ByteArray overload only exists from API 31; wrapping the same bytes
+        // in a ByteBuffer decodes identically from API 28 on.
+        val source = ImageDecoder.createSource(ByteBuffer.wrap(bytes))
+        ImageDecoder.decodeDrawable(source) { decoder, info, _ ->
+            val width = info.size.width
+            val height = info.size.height
+            val longest = max(width, height)
+            if (longest > maxPx) {
+                // Tall chat screenshots run to tens of thousands of pixels; every
+                // frame at full height would exhaust the heap before the first draw.
+                val ratio = maxPx.toFloat() / longest
+                decoder.setTargetSize(
+                    (width * ratio).toInt().coerceAtLeast(1),
+                    (height * ratio).toInt().coerceAtLeast(1),
+                )
+            }
+            // Animated frames have to be held in ordinary memory; the default
+            // allocator hands back a hardware image, which cannot be replayed.
+            decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+            decoder.memorySizePolicy = ImageDecoder.MEMORY_POLICY_LOW_RAM
+        }
+    }.getOrNull()
 
     private suspend fun load(item: MediaItem, targetPx: Int, bucket: String): Bitmap? {
         val key = "${item.id}@$bucket"
@@ -109,3 +197,12 @@ class ImageStore(private val context: Context) {
         return (max / 8).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
     }
 }
+
+/** Magic-number checks only ever look at the head of a file. */
+private const val HEADER_SCAN_LIMIT = 256
+
+/**
+ * Above this an animation is treated as still. Frames are held decoded and in
+ * memory at once, so a very large one can take the process down with it.
+ */
+private const val MAX_ANIMATION_BYTES = 24L * 1024 * 1024
