@@ -280,11 +280,10 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             val result = withContext(Dispatchers.IO) { repository.delete(selected) }
             recordCleanup(result)
             val removed = selected.mapTo(HashSet()) { it.id }
-            rawItems = rawItems.filterNot { it.id in removed }
-            byId = rawItems.associateBy { it.id }
-            withContext(Dispatchers.IO) { repository.save(source, rawItems) }
+            withContext(Dispatchers.IO) { repository.forgetInCache(source, removed) }
             publishItems(
                 "已删除 ${result.filesRemoved} 张图片，释放约 " + formatBytes(result.bytesReclaimed),
+                removed,
                 emptySet(),
             )
         }
@@ -302,11 +301,10 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             _state.update { it.copy(busy = true) }
             val result = withContext(Dispatchers.IO) { repository.delete(listOf(item)) }
             recordCleanup(result)
-            rawItems = rawItems.filterNot { it.id == item.id }
-            byId = rawItems.associateBy { it.id }
-            withContext(Dispatchers.IO) { repository.save(source, rawItems) }
+            withContext(Dispatchers.IO) { repository.forgetInCache(source, setOf(item.id)) }
             publishItems(
                 "已删除 ${result.filesRemoved} 张图片，释放约 " + formatBytes(result.bytesReclaimed),
+                setOf(item.id),
                 _state.value.selection - item.id,
             )
         }
@@ -325,14 +323,17 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
      * grid visibly stalls after every deletion. The arithmetic is moved off and only
      * the finished list is published.
      */
-    private suspend fun publishItems(message: String, keepSelection: Set<String>) {
+    private suspend fun publishItems(message: String, removedIds: Set<String>, keepSelection: Set<String>) {
         val snapshot = _state.value
         val published = withContext(Dispatchers.Default) {
-            val sorted = sort(rawItems, snapshot.sortMode)
+            val remaining = rawItems.filterNot { it.id in removedIds }
+            rawItems = remaining
+            byId = remaining.associateBy { it.id }
+            val sorted = sort(remaining, snapshot.sortMode)
             Published(
                 items = sorted,
                 displayRows = buildRows(sorted, snapshot.sortMode, snapshot.collapsed),
-                totalBytes = rawItems.sumOf { item -> item.size },
+                totalBytes = remaining.sumOf { item -> item.size },
             )
         }
         _state.update {

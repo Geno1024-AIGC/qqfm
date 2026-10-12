@@ -34,9 +34,49 @@ class MediaRepository(private val context: Context) {
                     items.add(MediaItem(source, path, base, path.substringAfterLast('/'), size, mtime))
                 }
             }
-            items
+            val deleted = deletedIds(source)
+            if (deleted.isEmpty()) {
+                items
+            } else {
+                // Deletions are appended rather than written back, so they are only
+                // applied here. Once enough of them pile up the index is rewritten
+                // without them, which is the one place the slow write belongs.
+                val kept = items.filterNot { it.id in deleted }
+                if (deleted.size >= COMPACT_THRESHOLD) compact(source, kept)
+                kept
+            }
         }.getOrNull()?.takeIf { it.isNotEmpty() }
     }
+
+    /**
+     * Records that [ids] are gone, without rewriting the index.
+     *
+     * The index is a few megabytes for a large directory, and rewriting all of it to
+     * drop one line costs more than the delete itself. Appending the id to a side file
+     * costs thirty-odd bytes and is applied the next time the index is read.
+     */
+    fun forgetInCache(source: MediaSource, ids: Set<String>) {
+        if (ids.isEmpty()) return
+        runCatching {
+            val file = removedFile(source)
+            file.appendText(ids.joinToString(separator = "\n", postfix = "\n"))
+        }
+    }
+
+    private fun deletedIds(source: MediaSource): Set<String> = runCatching {
+        val file = removedFile(source)
+        if (!file.exists()) return emptySet()
+        file.readLines().filterTo(HashSet()) { it.isNotBlank() }
+    }.getOrDefault(emptySet())
+
+    /** Rewrites the index without the removed entries and drops the side file. */
+    private fun compact(source: MediaSource, items: List<MediaItem>) {
+        save(source, items)
+        runCatching { removedFile(source).delete() }
+    }
+
+    private fun removedFile(source: MediaSource): File =
+        File(context.cacheDir, "scan-${source.id}.removed")
 
     /**
      * Walks [source] with `find` + `stat`. Missing and unreadable entries are
@@ -76,6 +116,7 @@ class MediaRepository(private val context: Context) {
     fun save(source: MediaSource, items: List<MediaItem>) {
         runCatching {
             val tmp = File(context.cacheDir, "scan-${source.id}.tsv.tmp")
+            // A fresh scan is the whole truth, so the removals it covers are done with.
             tmp.bufferedWriter().use { writer ->
                 items.forEach { item ->
                     writer.append(item.path).append('\t')
@@ -85,6 +126,7 @@ class MediaRepository(private val context: Context) {
                 }
             }
             tmp.renameTo(cacheFile(source))
+            runCatching { removedFile(source).delete() }
         }
     }
 
@@ -122,3 +164,6 @@ class MediaRepository(private val context: Context) {
         return DeleteResult(present.size.toLong(), reclaimed)
     }
 }
+
+/** How many recorded removals are worth a full rewrite of the index. */
+private const val COMPACT_THRESHOLD = 2_000
