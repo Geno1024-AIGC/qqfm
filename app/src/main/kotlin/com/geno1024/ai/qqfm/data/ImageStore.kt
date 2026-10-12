@@ -38,6 +38,14 @@ class ImageStore(private val context: Context) {
 
     private val diskDir = File(context.cacheDir, "thumbs").apply { mkdirs() }
 
+    /**
+     * Raw bytes of animated images, which the bitmap cache cannot hold: caching one
+     * means flattening it to a JPEG, and a flattened JPEG is one frame forever.
+     */
+    private val rawBytes = object : LruCache<String, ByteArray>(RAW_CACHE_BYTES.toInt()) {
+        override fun sizeOf(key: String, value: ByteArray): Int = value.size
+    }
+
     suspend fun thumbnail(item: MediaItem, targetPx: Int): Bitmap? = load(item, targetPx, "t$targetPx")
 
     /**
@@ -58,9 +66,14 @@ class ImageStore(private val context: Context) {
     }
 
     /** Reads the file itself first; the viewer wants this image, not its thumbnail. */
-    private suspend fun readViewerBytes(item: MediaItem): ByteArray? = withContext(Dispatchers.IO) {
-        semaphore.withPermit {
-            readAll(item.path) ?: readAll(item.thumbnailPath)
+    private suspend fun readViewerBytes(item: MediaItem): ByteArray? {
+        rawBytes.get(item.id)?.let { return it }
+        return withContext(Dispatchers.IO) {
+            semaphore.withPermit {
+                val bytes = readAll(item.path) ?: readAll(item.thumbnailPath)
+                if (bytes != null) rawBytes.put(item.id, bytes)
+                bytes
+            }
         }
     }
 
@@ -206,3 +219,6 @@ private const val HEADER_SCAN_LIMIT = 256
  * memory at once, so a very large one can take the process down with it.
  */
 private const val MAX_ANIMATION_BYTES = 24L * 1024 * 1024
+
+/** How much raw animation is kept around, in bytes. */
+private const val RAW_CACHE_BYTES = 16L * 1024 * 1024
