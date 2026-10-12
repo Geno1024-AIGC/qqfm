@@ -109,17 +109,14 @@ class MediaRepository(private val context: Context) {
         var done = 0
         batches.forEach { batch ->
             val args = batch.joinToString(" ") { RootShell.shellQuote(it) }
+            // Existence test and removal share one shell: `su` costs far more than the
+            // `rm` does, and a delete that forks twice is a delete that feels slow.
             RootShell.forEachLine(
-                "for p in $args; do [ -f \"\$p\" ] && printf '%s\\n' \"\$p\"; done 2>/dev/null",
+                "for p in $args; do if [ -f \"\$p\" ]; then printf '%s\\n' \"\$p\"; " +
+                    "rm -f -- \"\$p\"; fi; done 2>/dev/null",
             ) { line -> present.add(line) }
             done++
             onProgress(done)
-        }
-        if (present.isEmpty()) return DeleteResult(0L, 0L)
-
-        present.chunked(128).forEach { batch ->
-            val args = batch.joinToString(" ") { RootShell.shellQuote(it) }
-            RootShell.exec("rm -f -- $args")
         }
         val reclaimed = items.filter { it.path in present }.sumOf { it.size }
         return DeleteResult(present.size.toLong(), reclaimed)

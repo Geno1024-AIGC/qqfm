@@ -283,17 +283,10 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             rawItems = rawItems.filterNot { it.id in removed }
             byId = rawItems.associateBy { it.id }
             withContext(Dispatchers.IO) { repository.save(source, rawItems) }
-            _state.update {
-                it.copy(
-                    items = sort(rawItems, it.sortMode),
-                    totalBytes = rawItems.sumOf { item -> item.size },
-                    selection = emptySet(),
-                    selectionBytes = 0L,
-                    busy = false,
-                    message = "已删除 ${result.filesRemoved} 张图片，释放约 " +
-                        formatBytes(result.bytesReclaimed),
-                ).withRows()
-            }
+            publishItems(
+                "已删除 ${result.filesRemoved} 张图片，释放约 " + formatBytes(result.bytesReclaimed),
+                emptySet(),
+            )
         }
     }
 
@@ -312,17 +305,10 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             rawItems = rawItems.filterNot { it.id == item.id }
             byId = rawItems.associateBy { it.id }
             withContext(Dispatchers.IO) { repository.save(source, rawItems) }
-            _state.update {
-                it.copy(
-                    items = sort(rawItems, it.sortMode),
-                    totalBytes = rawItems.sumOf { entry -> entry.size },
-                    selection = it.selection - item.id,
-                    selectionBytes = bytesOf(it.selection - item.id),
-                    busy = false,
-                    message = "已删除 ${result.filesRemoved} 张图片，释放约 " +
-                        formatBytes(result.bytesReclaimed),
-                ).withRows()
-            }
+            publishItems(
+                "已删除 ${result.filesRemoved} 张图片，释放约 " + formatBytes(result.bytesReclaimed),
+                _state.value.selection - item.id,
+            )
         }
     }
 
@@ -330,6 +316,44 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     private fun bytesOf(selection: Set<String>): Long =
         selection.sumOf { byId[it]?.size ?: 0L }
+
+    /**
+     * Publishes a changed item list.
+     *
+     * Sorting and regrouping 165k entries allocates a row per image, which is tens of
+     * milliseconds; run inside a state update it all lands on the main thread and the
+     * grid visibly stalls after every deletion. The arithmetic is moved off and only
+     * the finished list is published.
+     */
+    private suspend fun publishItems(message: String, keepSelection: Set<String>) {
+        val snapshot = _state.value
+        val published = withContext(Dispatchers.Default) {
+            val sorted = sort(rawItems, snapshot.sortMode)
+            Published(
+                items = sorted,
+                displayRows = buildRows(sorted, snapshot.sortMode, snapshot.collapsed),
+                totalBytes = rawItems.sumOf { item -> item.size },
+            )
+        }
+        _state.update {
+            it.copy(
+                items = published.items,
+                displayRows = published.displayRows,
+                totalBytes = published.totalBytes,
+                selection = keepSelection,
+                selectionBytes = bytesOf(keepSelection),
+                busy = false,
+                message = message,
+            )
+        }
+    }
+
+    /** What a rebuild of the item list produced, computed away from the main thread. */
+    private data class Published(
+        val items: List<MediaItem>,
+        val displayRows: List<GalleryRow>,
+        val totalBytes: Long,
+    )
 
     /** Folds a finished deletion into the lifetime tally the about page shows. */
     private fun recordCleanup(result: com.geno1024.ai.qqfm.data.MediaRepository.DeleteResult) {
