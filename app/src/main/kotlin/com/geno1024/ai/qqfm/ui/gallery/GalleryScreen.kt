@@ -18,10 +18,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -305,38 +303,43 @@ private fun GalleryGrid(
                 )
             },
     ) {
-        itemsIndexed(
-            items = rows,
-            key = { _, row ->
-                when (row) {
-                    is GalleryRow.Header -> "h:${row.key}"
-                    is GalleryRow.Item -> "i:${state.items[row.index].id}"
-                }
-            },
-            span = { _, row ->
-                if (row is GalleryRow.Header) GridItemSpan(maxLineSpan) else GridItemSpan(1)
-            },
-        ) { _, row ->
-            when (row) {
-                is GalleryRow.Header -> GroupHeader(
-                    row = row,
-                    collapsed = row.key in state.collapsed,
-                    onClick = { viewModel.toggleCollapse(row.key) },
-                )
-                is GalleryRow.Item -> {
-                    val item = state.items[row.index]
-                    GridCell(
-                        item = item,
-                        selected = item.id in state.selection,
-                        selectionActive = state.selectionActive,
-                        frozen = item.id in state.frozen,
-                        imageStore = viewModel.imageStore,
-                        onClick = { onOpen(item) },
-                        onToggleSelection = { viewModel.toggleSelection(item.id) },
-                        onToggleFrozen = { viewModel.toggleFrozen(item.id) },
+        // Emitted as runs rather than one item per entry: a group is a header followed
+        // by a long stretch of cells, and registering 165k individual providers to
+        // rebuild that list on every composition would cost far more than it saves.
+        var cursor = 0
+        while (cursor < rows.size) {
+            val header = rows[cursor] as? GalleryRow.Header
+            if (header != null) {
+                stickyHeader(key = "h:${header.key}") {
+                    GroupHeader(
+                        row = header,
+                        collapsed = header.key in state.collapsed,
+                        onClick = { viewModel.toggleCollapse(header.key) },
                     )
                 }
+                cursor++
+                continue
             }
+            var end = cursor
+            while (end < rows.size && rows[end] !is GalleryRow.Header) end++
+            val from = cursor
+            items(
+                count = end - from,
+                key = { offset -> "i:${cellAt(rows, state.items, from, offset)?.id}" },
+            ) { offset ->
+                val item = cellAt(rows, state.items, from, offset) ?: return@items
+                GridCell(
+                    item = item,
+                    selected = item.id in state.selection,
+                    selectionActive = state.selectionActive,
+                    frozen = item.id in state.frozen,
+                    imageStore = viewModel.imageStore,
+                    onClick = { onOpen(item) },
+                    onToggleSelection = { viewModel.toggleSelection(item.id) },
+                    onToggleFrozen = { viewModel.toggleFrozen(item.id) },
+                )
+            }
+            cursor = end
         }
     }
 }
@@ -531,6 +534,17 @@ private fun Centered(content: @Composable () -> Unit) {
 }
 
 /** Maps a pointer position to the index of the item it lands on, ignoring headers. */
+/** The image a run of cells stands for, or null if the row list moved under us. */
+private fun cellAt(
+    rows: List<GalleryRow>,
+    items: List<MediaItem>,
+    from: Int,
+    offset: Int,
+): MediaItem? {
+    val entry = rows.getOrNull(from + offset) as? GalleryRow.Item ?: return null
+    return items.getOrNull(entry.index)
+}
+
 /**
  * The grid row under [position], read from the live layout.
  *
