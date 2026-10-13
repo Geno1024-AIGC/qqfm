@@ -269,7 +269,11 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         val snapshot = _state.value
         // Frozen items can never enter the selection, but the rule is enforced here
         // too: unlocking is the only way past it, whatever called this.
-        val selected = snapshot.items.filter { it.id in snapshot.selection && it.id !in snapshot.frozen }
+        val selected = snapshot.items.filter {
+            // byId only holds what is still on disk: a file deleted a moment ago is
+            // already gone from it even though the grid has not caught up yet.
+            it.id in snapshot.selection && it.id !in snapshot.frozen && it.id in byId
+        }
         if (selected.isEmpty()) {
             if (snapshot.selection.isNotEmpty()) {
                 _state.update { it.copy(message = "冻结的图片要先解锁才能删除") }
@@ -327,6 +331,16 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
      */
     private suspend fun publishItems(message: String, removedIds: Set<String>, keepSelection: Set<String>) {
         val snapshot = _state.value
+        // Say it straight away. Regrouping a large directory costs about a tenth of a
+        // second on a phone, and holding the answer back for that is what made a
+        // deletion feel slow even though the file was already gone.
+        _state.update {
+            it.copy(
+                selection = keepSelection,
+                selectionBytes = bytesOf(keepSelection),
+                message = message,
+            )
+        }
         val published = withContext(Dispatchers.Default) {
             val remaining = rawItems.filterNot { it.id in removedIds }
             rawItems = remaining
@@ -343,10 +357,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 items = published.items,
                 displayRows = published.displayRows,
                 totalBytes = published.totalBytes,
-                selection = keepSelection,
-                selectionBytes = bytesOf(keepSelection),
                 busy = false,
-                message = message,
             )
         }
     }
