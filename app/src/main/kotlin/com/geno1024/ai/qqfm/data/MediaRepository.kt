@@ -146,21 +146,16 @@ class MediaRepository(
     }
 
     /**
-     * Deletes every on-disk variant of the given bases. Callers pass the gallery
-     * items; each one expands to `chatimg`/`chatraw`/`chatthumb` files.
+     * Deletes exactly the files the caller is looking at, and nothing else.
      *
-     * Only the files that are actually there are counted: NTQQ names a file after
-     * `crc64("<tree>:<md5>")`, so three of the four variants normally miss, and
-     * reporting the candidate count would tell the user four files went away when
-     * one did.
+     * The three trees cannot be lined up by name — NTQQ names each tree's copy of a
+     * picture `crc64("<tree>:<md5>")` — so guessing at siblings would be a guess, and
+     * deleting a file from a directory the user is not browsing is not theirs to ask
+     * for. One picture, one file.
      */
     fun delete(items: List<MediaItem>, onProgress: (Int) -> Unit = {}): DeleteResult {
         if (items.isEmpty()) return DeleteResult(0L, 0L)
-        // The scanned path is the one file known to exist, so it goes first; the
-        // derived variants only add the sibling trees of older QQ layouts.
-        val candidates = items.flatMap { item ->
-            listOf(item.path) + MediaPaths.variants(item.base)
-        }.distinct()
+        val candidates = items.map { item -> item.path }.distinct()
         val batches = candidates.chunked(128)
         val present = HashSet<String>(candidates.size)
         var done = 0

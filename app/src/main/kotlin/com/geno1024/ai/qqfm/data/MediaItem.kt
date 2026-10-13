@@ -56,17 +56,6 @@ object MediaPaths {
         return "$dir/${stem.takeLast(3)}/$name"
     }
 
-    /**
-     * Every on-disk file that belongs to [base], used when deleting.
-     *
-     * Under NTQQ the same picture gets a different name in each tree
-     * (`crc64("<tree>:<md5>")`), so only the browsed tree normally matches; this
-     * still sweeps the others for the older layout that named all three alike.
-     */
-    fun variants(base: String): List<String> =
-        listOf("Cache_$base", "Cache_${base}$HD_SUFFIX").flatMap { name ->
-            listOf(IMG_DIR, RAW_DIR, THUMB_DIR).map { dir -> pathIn(dir, name) }
-        }
 
     private const val HD_SUFFIX = "_hd"
 }

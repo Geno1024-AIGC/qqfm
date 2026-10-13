@@ -10,8 +10,6 @@ import android.os.Build
 import android.util.LruCache
 import androidx.annotation.RequiresApi
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
@@ -29,8 +27,6 @@ sealed interface LoadedImage {
  * a small semaphore because every read spawns an `su` process.
  */
 class ImageStore(private val context: Context) {
-
-    private val semaphore = Semaphore(4)
 
     private val memory = object : LruCache<String, Bitmap>(memoryCacheSize()) {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
@@ -69,11 +65,9 @@ class ImageStore(private val context: Context) {
     private suspend fun readViewerBytes(item: MediaItem): ByteArray? {
         rawBytes.get(item.id)?.let { return it }
         return withContext(Dispatchers.IO) {
-            semaphore.withPermit {
-                val bytes = readAll(item.path) ?: readAll(item.thumbnailPath)
-                if (bytes != null) rawBytes.put(item.id, bytes)
-                bytes
-            }
+            val bytes = readAll(item.path) ?: readAll(item.thumbnailPath)
+            if (bytes != null) rawBytes.put(item.id, bytes)
+            bytes
         }
     }
 
@@ -143,17 +137,17 @@ class ImageStore(private val context: Context) {
         }
 
         return withContext(Dispatchers.IO) {
-            semaphore.withPermit {
-                val bytes = readCandidates(item) ?: return@withPermit null
-                val bitmap = decodeSampled(bytes, targetPx) ?: return@withPermit null
-                runCatching {
-                    FileOutputStream(disk).use { out ->
-                        bitmap.compress(Bitmap.CompressFormat.JPEG, 82, out)
-                    }
+            // The root shell serialises the read on its own, so nothing is gained by
+            // holding a permit across it, and decoding is worth doing in parallel.
+            val bytes = readCandidates(item) ?: return@withContext null
+            val bitmap = decodeSampled(bytes, targetPx) ?: return@withContext null
+            runCatching {
+                FileOutputStream(disk).use { out ->
+                    bitmap.compress(Bitmap.CompressFormat.JPEG, 82, out)
                 }
-                memory.put(key, bitmap)
-                bitmap
             }
+            memory.put(key, bitmap)
+            bitmap
         }
     }
 
@@ -171,9 +165,8 @@ class ImageStore(private val context: Context) {
         return null
     }
 
-    private fun readAll(path: String): ByteArray? = runCatching {
-        RootShell.openRead(path).use { holder -> holder.stream.readBytes() }
-    }.getOrNull()?.takeIf { it.isNotEmpty() }
+    private fun readAll(path: String): ByteArray? =
+        RootShell.readBytes(path)?.takeIf { it.isNotEmpty() }
 
     private fun decodeSampled(bytes: ByteArray, targetPx: Int): Bitmap? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
