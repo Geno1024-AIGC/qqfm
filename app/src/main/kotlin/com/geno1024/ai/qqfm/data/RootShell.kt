@@ -36,35 +36,54 @@ object RootShell {
     private val session = Session()
 
     /** Runs a command to completion and returns its merged output. */
-    fun exec(command: String, timeoutSeconds: Long = 0): ShellResult {
-        val outcome = session.capture(command, timeoutMillis(timeoutSeconds))
-        if (outcome != null) {
-            return ShellResult(String(outcome.output, StandardCharsets.UTF_8), outcome.exitCode)
-        }
-        return oneShot(command, timeoutSeconds)
-    }
+    fun exec(command: String, timeoutSeconds: Long = 0): ShellResult =
+        oneShot(command, timeoutSeconds)
 
     /** Streams a command's output line by line without buffering the whole thing. */
-    fun forEachLine(command: String, action: (String) -> Unit) {
-        val streamed = session.stream(command, STREAM_TIMEOUT_MILLIS, action)
-        if (streamed) return
+    fun forEachLine(command: String, action: (String) -> Unit) = oneShotStream(command, action)
+
+    /**
+     * The same, but over the shared shell.
+     *
+     * Only the delete path uses this: one command in, one command out, so the pipe
+     * is never carrying anything large, and the saving is one `su` start per delete
+     * instead of one per picture.
+     */
+    fun forEachLineInSession(command: String, action: (String) -> Unit) {
+        if (session.stream(command, SESSION_TIMEOUT_MILLIS, action)) return
         oneShotStream(command, action)
     }
 
     /**
-     * Reads a whole file as bytes.
+     * Reads a whole file, one `su` per file.
      *
-     * Binary, so it does not go through the line reader: the bytes are collected up
-     * to the marker as they arrive.
+     * This deliberately does not go through the shared shell. Pictures are large and
+     * arrive in bursts, and a single pipe carrying both bulk reads and bulk deletes
+     * would make every thumbnail wait behind whatever else is in flight.
      */
-    fun readBytes(path: String): ByteArray? {
-        // cat complains on stderr, and the wrapper merges stderr into stdout, so the
-        // complaint is turned off here and the exit code is what decides success.
-        val command = "cat -- ${shellQuote(path)} 2>/dev/null"
-        session.capture(command, READ_TIMEOUT_MILLIS)?.let { outcome ->
-            return if (outcome.exitCode == 0) outcome.output else null
+    fun readBytes(path: String): ByteArray? = oneShotRead("cat -- ${shellQuote(path)} 2>/dev/null")
+
+    /**
+     * Opens a root-owned file for reading. The returned stream owns the `su`
+     * process; closing it releases both. stderr is discarded inside the shell so
+     * the binary payload on stdout stays clean.
+     */
+    fun openRead(path: String): CloseableStream {
+        val process = ProcessBuilder("su", "-c", "cat -- ${shellQuote(path)} 2>/dev/null")
+            .redirectErrorStream(false)
+            .start()
+        return CloseableStream(process.inputStream, process)
+    }
+
+    class CloseableStream(
+        val stream: InputStream,
+        private val process: Process,
+    ) : Closeable {
+        override fun close() {
+            runCatching { stream.close() }
+            runCatching { process.waitFor(2, TimeUnit.SECONDS) }
+            runCatching { process.destroy() }
         }
-        return oneShotRead(command)
     }
 
     fun isRootAvailable(): Boolean = runCatching {
@@ -74,9 +93,6 @@ object RootShell {
 
     /** Closes the shared shell so no root process outlives the app. */
     fun shutdown() = session.close()
-
-    private fun timeoutMillis(timeoutSeconds: Long): Long =
-        if (timeoutSeconds > 0) timeoutSeconds * 1000 else DEFAULT_TIMEOUT_MILLIS
 
     // ---- one-shot fallbacks, used when the shared shell is unavailable ----
 
@@ -154,8 +170,6 @@ object RootShell {
                 Thread(runnable, "qqfm-root-watchdog").apply { isDaemon = true }
             }
 
-        class Outcome(val output: ByteArray, val exitCode: Int)
-
         /** Streams stdout line by line; returns false when the shell could not be used. */
         fun stream(command: String, timeoutMillis: Long, action: (String) -> Unit): Boolean {
             synchronized(lock) {
@@ -179,55 +193,6 @@ object RootShell {
                     kill()
                     return false
                 }
-            }
-        }
-
-        /** Collects everything printed before the marker; binary safe. */
-        fun capture(command: String, timeoutMillis: Long): Outcome? = synchronized(lock) {
-            val connection = connect() ?: return null
-            val token = nextToken()
-            val deadline = run(command, token, timeoutMillis) ?: return null
-            try {
-                val collected = ByteArrayOutputStream()
-                val stream = connection.input
-                val marker = "$token:".toByteArray(StandardCharsets.UTF_8)
-                var tail = ByteArray(0)
-                var trailer = ""
-                var finished = false
-                while (!finished) {
-                    val buffer = ByteArray(16 * 1024)
-                    val read = stream.read(buffer)
-                    if (read <= 0) break
-                    val combined = tail + buffer.copyOf(read)
-                    val index = indexOf(combined, marker)
-                    if (index >= 0) {
-                        collected.write(combined, 0, index)
-                        trailer = String(combined, index, combined.size - index, StandardCharsets.UTF_8)
-                        finished = true
-                    } else {
-                        // Hold back just enough of the end to recognise a marker
-                        // that was split across two reads.
-                        val keep = (marker.size - 1).coerceAtMost(combined.size)
-                        val boundary = combined.size - keep
-                        collected.write(combined, 0, boundary)
-                        tail = combined.copyOfRange(boundary, combined.size)
-                    }
-                }
-                deadline.cancel()
-                if (!finished) {
-                    // No marker: the shell went away mid-command, so nothing that
-                    // follows on this pipe can be trusted.
-                    kill()
-                    return null
-                }
-                val code = trailer.substringAfter(':', "")
-                    .substringBefore('\n')
-                    .trim()
-                    .toIntOrNull() ?: -1
-                Outcome(collected.toByteArray(), code)
-            } catch (_: Exception) {
-                kill()
-                null
             }
         }
 
@@ -334,10 +299,7 @@ object RootShell {
         }
     }
 
-    private const val DEFAULT_TIMEOUT_MILLIS = 60_000L
-    private const val READ_TIMEOUT_MILLIS = 60_000L
-
-    /** A directory walk of 165k files is allowed to take minutes, but not forever. */
-    private const val STREAM_TIMEOUT_MILLIS = 10 * 60_000L
+    /** A delete over a few hundred paths is seconds at worst. */
+    private const val SESSION_TIMEOUT_MILLIS = 60_000L
     private const val FALLBACK_BACKOFF_MILLIS = 60_000L
 }

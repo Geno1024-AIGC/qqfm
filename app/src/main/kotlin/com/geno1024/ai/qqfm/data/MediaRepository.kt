@@ -163,7 +163,7 @@ class MediaRepository(
             val args = batch.joinToString(" ") { RootShell.shellQuote(it) }
             // Existence test and removal share one shell: `su` costs far more than the
             // `rm` does, and a delete that forks twice is a delete that feels slow.
-            RootShell.forEachLine(
+            RootShell.forEachLineInSession(
                 "for p in $args; do if [ -f \"\$p\" ]; then printf '%s\\n' \"\$p\"; " +
                     "rm -f -- \"\$p\"; fi; done 2>/dev/null",
             ) { line -> present.add(line) }
