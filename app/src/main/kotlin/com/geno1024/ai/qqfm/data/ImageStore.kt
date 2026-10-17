@@ -15,6 +15,7 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import kotlin.math.sqrt
 import java.nio.ByteBuffer
 import kotlin.math.max
 
@@ -185,7 +186,7 @@ class ImageStore(private val context: Context) {
         }
         return runCatching {
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
-        }.getOrNull()
+        }.getOrNull()?.let(::withinDrawableSize)
     }
 
     private fun decodeFile(file: File, targetPx: Int): Bitmap? {
@@ -196,13 +197,54 @@ class ImageStore(private val context: Context) {
             inSampleSize = sampleSize(bounds.outWidth, bounds.outHeight, targetPx)
             inPreferredConfig = Bitmap.Config.RGB_565
         }
-        return runCatching { BitmapFactory.decodeFile(file.absolutePath, options) }.getOrNull()
+        return runCatching { BitmapFactory.decodeFile(file.absolutePath, options) }
+            .getOrNull()
+            ?.let(::withinDrawableSize)
     }
 
+    /**
+     * How much to shrink by, counted in pixels rather than in sides.
+     *
+     * The old rule only halved while both sides stayed above the target, which meant
+     * a screenshot 1080 wide never shrank at all however tall it was: QQ's long
+     * images are thousands of pixels high and decoding one at full size asks for
+     * more memory than any device has, and the canvas refuses to draw it anyway.
+     */
     private fun sampleSize(width: Int, height: Int, target: Int): Int {
+        val budget = target.toLong() * target * PIXEL_BUDGET_FACTOR
         var sample = 1
-        while (width / (sample * 2) >= target && height / (sample * 2) >= target) sample *= 2
+        while ((width.toLong() / sample) * (height.toLong() / sample) > budget) sample *= 2
         return sample
+    }
+
+    /**
+     * Last line of defence against the canvas's size limit.
+     *
+     * Sampling only ever halves, so a picture just over a limit can still land over
+     * it; this scales down whatever is left. A long screenshot ends up small, but it
+     * ends up on screen instead of taking the process with it.
+     */
+    private fun withinDrawableSize(bitmap: Bitmap): Bitmap? {
+        var current = bitmap
+        while (current.byteCount > MAX_BITMAP_BYTES ||
+            current.width > MAX_BITMAP_SIDE ||
+            current.height > MAX_BITMAP_SIDE
+        ) {
+            val bySide = minOf(
+                MAX_BITMAP_SIDE.toFloat() / current.width,
+                MAX_BITMAP_SIDE.toFloat() / current.height,
+            )
+            val byBytes = sqrt(MAX_BITMAP_BYTES.toDouble() / current.byteCount).toFloat()
+            val ratio = minOf(bySide, byBytes).coerceAtMost(1f)
+            if (ratio >= 1f) return current
+            val width = (current.width * ratio).toInt().coerceAtLeast(1)
+            val height = (current.height * ratio).toInt().coerceAtLeast(1)
+            val scaled = runCatching { Bitmap.createScaledBitmap(current, width, height, true) }
+                .getOrNull() ?: return current
+            if (scaled !== current && !current.isRecycled) current.recycle()
+            current = scaled
+        }
+        return current
     }
 
     private fun memoryCacheSize(): Int {
@@ -222,3 +264,10 @@ private const val MAX_ANIMATION_BYTES = 24L * 1024 * 1024
 
 /** How much raw animation is kept around, in bytes. */
 private const val RAW_CACHE_BYTES = 16L * 1024 * 1024
+
+/** How much a decode may exceed its target before it is halved again, in pixels². */
+private const val PIXEL_BUDGET_FACTOR = 2L
+
+/** What the canvas refuses to draw: roughly a texture's worth of memory and side. */
+private const val MAX_BITMAP_BYTES = 32L * 1024 * 1024
+private const val MAX_BITMAP_SIDE = 8192
