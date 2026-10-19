@@ -63,7 +63,6 @@ import com.geno1024.ai.qqfm.data.ImageStore
 import com.geno1024.ai.qqfm.data.LoadedImage
 import com.geno1024.ai.qqfm.data.MediaItem
 import com.geno1024.ai.qqfm.data.MediaPaths
-import com.geno1024.ai.qqfm.ui.DeleteConfirmDialog
 import com.geno1024.ai.qqfm.ui.formatBytes
 import com.geno1024.ai.qqfm.ui.formatTimestamp
 import kotlinx.coroutines.delay
@@ -169,7 +168,6 @@ fun ViewerScreen(
     // The file on screen comes from one exact path, so the deletion is confirmed by
     // naming it: browsing several trees at once makes "which one is this" worth
     // answering before anything is removed.
-    var confirming by remember { mutableStateOf<MediaItem?>(null) }
 
     Scaffold(
         topBar = {
@@ -204,7 +202,7 @@ fun ViewerScreen(
                                 showNotice("这张已冻结，解锁后才能删除")
                                 return@IconButton
                             }
-                            confirming = item
+                            onDelete(item, pagerState.currentPage)
                         },
                         enabled = !deleting,
                     ) {
@@ -331,21 +329,7 @@ fun ViewerScreen(
                 }
             }
 
-            val pending = confirming
-            if (pending != null) {
-                DeleteConfirmDialog(
-                    items = listOf(pending),
-                    onConfirm = {
-                        confirming = null
-                        val index = pagerState.currentPage
-                        if (pending.id == items.getOrNull(index)?.id) {
-                            deleting = true
-                            onDelete(pending, index)
-                        }
-                    },
-                    onDismiss = { confirming = null },
-                )
-            }
+
 
             val text = notice
             if (text != null) {

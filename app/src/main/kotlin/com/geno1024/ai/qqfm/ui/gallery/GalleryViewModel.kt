@@ -64,9 +64,9 @@ data class GalleryUiState(
 ) {
     val selectionActive: Boolean get() = selection.isNotEmpty()
 
-    /** Names of the browsed trees, for the top bar. */
+    /** Number of selected sources, for the top bar. */
     val sourceLabel: String
-        get() = sources.sortedBy { it.ordinal }.joinToString(" + ") { it.id }
+        get() = if (sources.isEmpty()) "" else "${sources.size} 个目录" 
 }
 
 class GalleryViewModel(application: Application) : AndroidViewModel(application) {

@@ -71,7 +71,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.geno1024.ai.qqfm.data.ImageStore
 import com.geno1024.ai.qqfm.data.MediaItem
-import com.geno1024.ai.qqfm.ui.DeleteConfirmDialog
 import com.geno1024.ai.qqfm.ui.formatBytes
 import com.geno1024.ai.qqfm.ui.formatTimestamp
 
@@ -88,7 +87,6 @@ fun GalleryScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     // Held here rather than in the view model: it is a question about this screen, and
     // it has to survive recompositions while the grid redraws underneath it.
-    var confirming by remember { mutableStateOf<List<MediaItem>?>(null) }
     LaunchedEffect(state.message) {
         val message = state.message ?: return@LaunchedEffect
         snackbarHostState.showSnackbar(message)
@@ -99,9 +97,7 @@ fun GalleryScreen(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = { GalleryTopBar(state, viewModel, onOpenAbout, onOpenSources) },
         bottomBar = {
-            if (state.selectionActive) {
-                SelectionBar(state, viewModel) { pending -> confirming = pending }
-            }
+            if (state.selectionActive) SelectionBar(state, viewModel)
         },
     ) { padding ->
         Box(Modifier.padding(padding).fillMaxSize()) {
@@ -125,17 +121,7 @@ fun GalleryScreen(
         }
     }
 
-    val pending = confirming
-    if (pending != null) {
-        DeleteConfirmDialog(
-            items = pending,
-            onConfirm = {
-                confirming = null
-                viewModel.deleteSelected()
-            },
-            onDismiss = { confirming = null },
-        )
-    }
+
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -151,7 +137,7 @@ private fun GalleryTopBar(
             if (state.selectionActive) {
                 Text("已选 ${state.selection.size} 项")
             } else {
-                Text("${state.sourceLabel} · ${state.items.size}")
+                Text("${state.items.size} 张")
             }
         },
         navigationIcon = {
@@ -160,8 +146,7 @@ private fun GalleryTopBar(
                     Icon(Icons.Filled.Close, contentDescription = "取消选择")
                 }
             } else {
-                TextButton(onClick = onOpenSources) {
-                    Text(state.sourceLabel)
+                IconButton(onClick = onOpenSources) {
                     Icon(Icons.Filled.ArrowDropDown, contentDescription = "切换目录")
                 }
             }
@@ -217,7 +202,6 @@ private fun SortMenu(current: SortMode, onSelect: (SortMode) -> Unit) {
 private fun SelectionBar(
     state: GalleryUiState,
     viewModel: GalleryViewModel,
-    onRequestDelete: (List<MediaItem>) -> Unit,
 ) {
     Surface(tonalElevation = 3.dp) {
         Row(
@@ -228,13 +212,7 @@ private fun SelectionBar(
         ) {
             Text("${state.selection.size} 项 · ${formatBytes(state.selectionBytes)}")
             Spacer(Modifier.weight(1f))
-            Button(
-                onClick = {
-                    val picked = state.items.filter { it.id in state.selection }
-                    if (picked.isNotEmpty()) onRequestDelete(picked)
-                },
-                enabled = !state.busy,
-            ) {
+            Button(onClick = viewModel::deleteSelected, enabled = !state.busy) {
                 Icon(Icons.Filled.Delete, contentDescription = null)
                 Spacer(Modifier.width(6.dp))
                 Text("删除")
