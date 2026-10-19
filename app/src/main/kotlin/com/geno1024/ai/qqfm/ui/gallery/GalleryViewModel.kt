@@ -46,8 +46,7 @@ data class GalleryUiState(
     val loading: Boolean = true,
     val scanning: Boolean = false,
     val scannedCount: Int = 0,
-    val source: MediaSource? = null,
-    val pickerVisible: Boolean = false,
+    val sources: Set<MediaSource> = emptySet(),
     val items: List<MediaItem> = emptyList(),
     val totalBytes: Long = 0L,
     val sortMode: SortMode = SortMode.TIME_DESC,
@@ -57,12 +56,17 @@ data class GalleryUiState(
     val cleanedFiles: Long = 0L,
     val cleanedBytes: Long = 0L,
     val persistScanIndex: Boolean = true,
+    val hideFrozen: Boolean = false,
     val selection: Set<String> = emptySet(),
     val selectionBytes: Long = 0L,
     val busy: Boolean = false,
     val message: String? = null,
 ) {
     val selectionActive: Boolean get() = selection.isNotEmpty()
+
+    /** Names of the browsed trees, for the top bar. */
+    val sourceLabel: String
+        get() = sources.sortedBy { it.ordinal }.joinToString(" + ") { it.id }
 }
 
 class GalleryViewModel(application: Application) : AndroidViewModel(application) {
@@ -88,6 +92,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                     cleanedFiles = settings.cleanedFiles,
                     cleanedBytes = settings.cleanedBytes,
                     persistScanIndex = settings.persistScanIndex,
+                    hideFrozen = settings.hideFrozen,
                 )
             }
             val root = withContext(Dispatchers.IO) { RootShell.isRootAvailable() }
@@ -102,13 +107,22 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    /** Switches the browsed tree; the first choice is what the gallery opens with. */
-    fun chooseSource(source: MediaSource) {
-        val changed = _state.value.source != source
+    /** Which trees the picker should tick when it opens. */
+    fun rememberedSources(): Set<MediaSource> = settings.selectedSources
+
+    /**
+     * Browses exactly [sources], merged into one list.
+     *
+     * Several trees at once is the point: the same picture can sit in more than one of
+     * them, and merged they sort and group together as if they were one directory.
+     */
+    fun chooseSources(sources: Set<MediaSource>) {
+        if (sources.isEmpty()) return
+        val changed = _state.value.sources != sources
+        settings.selectedSources = sources
         _state.update {
             it.copy(
-                source = source,
-                pickerVisible = false,
+                sources = sources,
                 collapsed = emptySet(),
                 selection = emptySet(),
                 selectionBytes = 0L,
@@ -121,52 +135,100 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             )
         }
         endDrag()
-        rawItems = emptyList()
-        byId = emptyMap()
-        if (changed && _state.value.rootAvailable == true) load(forceScan = false)
+        if (changed) {
+            rawItems = emptyList()
+            byId = emptyMap()
+            if (_state.value.rootAvailable == true) load(forceScan = false)
+        } else {
+            republish()
+        }
     }
-
-    fun openPicker() = _state.update { it.copy(pickerVisible = true) }
-
-    fun dismissPicker() = _state.update { it.copy(pickerVisible = false) }
 
     fun refresh() {
         if (_state.value.rootAvailable == true) load(forceScan = true)
     }
 
-    private fun load(forceScan: Boolean) {
-        val source = _state.value.source ?: return
-        viewModelScope.launch {
-            _state.update { it.copy(loading = true, scanning = false, message = null) }
-            val cached = if (forceScan) null
-            else withContext(Dispatchers.IO) { repository.loadCached(source) }
-
-            if (cached != null) {
-                applyItems(source, cached, fromScan = false)
-                return@launch
-            }
-
-            _state.update { it.copy(scanning = true, scannedCount = 0) }
-            val outcome = withContext(Dispatchers.IO) {
-                repository.scan(source) { count -> _state.update { it.copy(scannedCount = count) } }
-            }
-            applyItems(source, outcome.items, fromScan = true)
-        }
+    /** Keeps a frozen image out of the gallery, for people who pin to forget. */
+    fun setHideFrozen(enabled: Boolean) {
+        settings.hideFrozen = enabled
+        _state.update { it.copy(hideFrozen = enabled) }
+        if (_state.value.sources.isNotEmpty()) republish()
     }
 
-    private fun applyItems(source: MediaSource, items: List<MediaItem>, fromScan: Boolean) {
+    private fun republish() {
+        val items = visibleItems()
         rawItems = items
         byId = items.associateBy { it.id }
         _state.update {
             it.copy(
                 items = sort(items, it.sortMode),
                 totalBytes = items.sumOf { item -> item.size },
+                selection = it.selection intersect items.mapTo(HashSet()) { entry -> entry.id },
+                selectionBytes = bytesOf(_state.value.selection),
+            ).withRows()
+        }
+    }
+
+    /** The scan minus whatever the user has hidden. */
+    private fun visibleItems(): List<MediaItem> = visibleItemsOf(rawItems)
+
+    private fun visibleItemsOf(items: List<MediaItem>): List<MediaItem> {
+        val frozen = _state.value.frozen
+        val hide = _state.value.hideFrozen
+        return if (hide && frozen.isNotEmpty()) items.filterNot { it.id in frozen } else items
+    }
+
+    /**
+     * Loads every selected tree, from the index when there is one and from disk
+     * otherwise. Each tree keeps its own index on disk, so switching the selection
+     * back and forth stays cheap.
+     */
+    private fun load(forceScan: Boolean) {
+        val sources = _state.value.sources
+        if (sources.isEmpty()) return
+        viewModelScope.launch {
+            _state.update { it.copy(loading = true, scanning = false, message = null) }
+            if (!forceScan) {
+                val cached = withContext(Dispatchers.IO) {
+                    sources.mapNotNull { source -> repository.loadCached(source) }
+                }
+                if (cached.isNotEmpty()) {
+                    applyItems(cached.flatten(), fromScan = false)
+                    return@launch
+                }
+            }
+
+            _state.update { it.copy(scanning = true, scannedCount = 0) }
+            val collected = ArrayList<MediaItem>(sources.size * 100_000)
+            val counted = intArrayOf(0)
+            for (source in sources) {
+                val outcome = withContext(Dispatchers.IO) {
+                    repository.scan(source) { found ->
+                        _state.update { it.copy(scannedCount = counted[0] + found) }
+                    }
+                }
+                collected += outcome.items
+                counted[0] += outcome.items.size
+                _state.update { it.copy(scannedCount = counted[0]) }
+            }
+            applyItems(collected, fromScan = true)
+        }
+    }
+
+    private fun applyItems(items: List<MediaItem>, fromScan: Boolean) {
+        val visible = visibleItemsOf(items)
+        rawItems = visible
+        byId = visible.associateBy { it.id }
+        _state.update {
+            it.copy(
+                items = sort(visible, it.sortMode),
+                totalBytes = visible.sumOf { item -> item.size },
                 selection = emptySet(),
                 selectionBytes = 0L,
                 loading = false,
                 scanning = false,
-                scannedCount = items.size,
-                message = if (fromScan) "扫描完成：${items.size} 张图片" else null,
+                scannedCount = visible.size,
+                message = if (fromScan) "扫描完成：${visible.size} 张图片" else null,
             ).withRows()
         }
     }
@@ -280,13 +342,12 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             }
             return
         }
-        val source = snapshot.source ?: return
         viewModelScope.launch {
             _state.update { it.copy(busy = true) }
             val result = withContext(Dispatchers.IO) { repository.delete(selected) }
             recordCleanup(result)
             val removed = selected.mapTo(HashSet()) { it.id }
-            withContext(Dispatchers.IO) { repository.forgetInCache(source, removed) }
+            withContext(Dispatchers.IO) { forgetInIndex(selected, removed) }
             publishItems(
                 "已删除 ${result.filesRemoved} 张图片，释放约 " + formatBytes(result.bytesReclaimed),
                 removed,
@@ -302,12 +363,11 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             _state.update { it.copy(message = "冻结的图片要先解锁才能删除") }
             return
         }
-        val source = _state.value.source ?: return
         viewModelScope.launch {
             _state.update { it.copy(busy = true) }
             val result = withContext(Dispatchers.IO) { repository.delete(listOf(item)) }
             recordCleanup(result)
-            withContext(Dispatchers.IO) { repository.forgetInCache(source, setOf(item.id)) }
+            withContext(Dispatchers.IO) { forgetInIndex(listOf(item), setOf(item.id)) }
             publishItems(
                 "已删除 ${result.filesRemoved} 张图片，释放约 " + formatBytes(result.bytesReclaimed),
                 setOf(item.id),
@@ -342,7 +402,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             )
         }
         val published = withContext(Dispatchers.Default) {
-            val remaining = rawItems.filterNot { it.id in removedIds }
+            val remaining = visibleItemsOf(rawItems).filterNot { it.id in removedIds }
             rawItems = remaining
             byId = remaining.associateBy { it.id }
             val sorted = sort(remaining, snapshot.sortMode)
@@ -380,6 +440,13 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         _state.update { it.copy(persistScanIndex = enabled) }
         if (!enabled) {
             viewModelScope.launch(Dispatchers.IO) { repository.discardIndex() }
+        }
+    }
+
+    /** Notes the removals in each tree's own index, since a selection can span trees. */
+    private suspend fun forgetInIndex(items: List<MediaItem>, removedIds: Set<String>) {
+        items.groupBy { it.source }.forEach { (source, entries) ->
+            repository.forgetInCache(source, entries.mapTo(HashSet()) { it.id })
         }
     }
 

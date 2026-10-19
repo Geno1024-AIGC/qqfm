@@ -43,7 +43,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -70,11 +69,9 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import com.geno1024.ai.qqfm.data.ImageStore
 import com.geno1024.ai.qqfm.data.MediaItem
-import com.geno1024.ai.qqfm.data.MediaSource
+import com.geno1024.ai.qqfm.ui.DeleteConfirmDialog
 import com.geno1024.ai.qqfm.ui.formatBytes
 import com.geno1024.ai.qqfm.ui.formatTimestamp
 
@@ -86,8 +83,12 @@ fun GalleryScreen(
     gridState: LazyGridState,
     onOpen: (MediaItem) -> Unit,
     onOpenAbout: () -> Unit,
+    onOpenSources: () -> Unit,
 ) {
     val snackbarHostState = remember { SnackbarHostState() }
+    // Held here rather than in the view model: it is a question about this screen, and
+    // it has to survive recompositions while the grid redraws underneath it.
+    var confirming by remember { mutableStateOf<List<MediaItem>?>(null) }
     LaunchedEffect(state.message) {
         val message = state.message ?: return@LaunchedEffect
         snackbarHostState.showSnackbar(message)
@@ -96,15 +97,16 @@ fun GalleryScreen(
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
-        topBar = { GalleryTopBar(state, viewModel, onOpenAbout) },
+        topBar = { GalleryTopBar(state, viewModel, onOpenAbout, onOpenSources) },
         bottomBar = {
-            if (state.selectionActive) SelectionBar(state, viewModel)
+            if (state.selectionActive) {
+                SelectionBar(state, viewModel) { pending -> confirming = pending }
+            }
         },
     ) { padding ->
         Box(Modifier.padding(padding).fillMaxSize()) {
             when {
                 state.rootAvailable == false -> RootPrompt(onRetry = viewModel::retryRoot)
-                state.source == null -> Unit
                 state.loading -> Centered { CircularProgressIndicator() }
                 state.scanning && state.items.isEmpty() -> Centered {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -120,15 +122,19 @@ fun GalleryScreen(
                     modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth(),
                 )
             }
-            if (state.source == null || state.pickerVisible) {
-                SourcePicker(
-                    current = state.source,
-                    onPick = viewModel::chooseSource,
-                    onDismiss = viewModel::dismissPicker,
-                    dismissible = state.pickerVisible,
-                )
-            }
         }
+    }
+
+    val pending = confirming
+    if (pending != null) {
+        DeleteConfirmDialog(
+            items = pending,
+            onConfirm = {
+                confirming = null
+                viewModel.deleteSelected()
+            },
+            onDismiss = { confirming = null },
+        )
     }
 }
 
@@ -138,13 +144,14 @@ private fun GalleryTopBar(
     state: GalleryUiState,
     viewModel: GalleryViewModel,
     onOpenAbout: () -> Unit,
+    onOpenSources: () -> Unit,
 ) {
     TopAppBar(
         title = {
             if (state.selectionActive) {
                 Text("已选 ${state.selection.size} 项")
             } else {
-                Text("${state.source?.id ?: "QQ 图片"} · ${state.items.size}")
+                Text("${state.sourceLabel} · ${state.items.size}")
             }
         },
         navigationIcon = {
@@ -153,8 +160,8 @@ private fun GalleryTopBar(
                     Icon(Icons.Filled.Close, contentDescription = "取消选择")
                 }
             } else {
-                TextButton(onClick = viewModel::openPicker) {
-                    Text(state.source?.id ?: "选择目录")
+                TextButton(onClick = onOpenSources) {
+                    Text(state.sourceLabel)
                     Icon(Icons.Filled.ArrowDropDown, contentDescription = "切换目录")
                 }
             }
@@ -178,53 +185,6 @@ private fun GalleryTopBar(
             }
         },
     )
-}
-
-@Composable
-private fun SourcePicker(
-    current: MediaSource?,
-    onPick: (MediaSource) -> Unit,
-    onDismiss: () -> Unit,
-    dismissible: Boolean,
-) {
-    Dialog(
-        onDismissRequest = { if (dismissible) onDismiss() },
-        properties = DialogProperties(
-            dismissOnBackPress = dismissible,
-            dismissOnClickOutside = dismissible,
-        ),
-    ) {
-        Surface(
-            shape = MaterialTheme.shapes.large,
-            tonalElevation = 6.dp,
-        ) {
-            Column(modifier = Modifier.padding(vertical = 8.dp)) {
-                Text(
-                    text = "选择图片目录",
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.padding(start = 24.dp, end = 24.dp, top = 8.dp, bottom = 4.dp),
-                )
-                MediaSource.entries.forEach { source ->
-                    ListItem(
-                        headlineContent = { Text(source.id) },
-                        supportingContent = { Text(sourceHint(source)) },
-                        leadingContent = {
-                            if (source == current) {
-                                Icon(Icons.Filled.Check, contentDescription = null)
-                            }
-                        },
-                        modifier = Modifier.clickable { onPick(source) },
-                    )
-                }
-            }
-        }
-    }
-}
-
-private fun sourceHint(source: MediaSource): String = when (source) {
-    MediaSource.IMG -> "聊天窗口里展示的图片"
-    MediaSource.RAW -> "收到的原始图片"
-    MediaSource.THUMB -> "缩略图"
 }
 
 @Composable
@@ -254,7 +214,11 @@ private fun SortMenu(current: SortMode, onSelect: (SortMode) -> Unit) {
 }
 
 @Composable
-private fun SelectionBar(state: GalleryUiState, viewModel: GalleryViewModel) {
+private fun SelectionBar(
+    state: GalleryUiState,
+    viewModel: GalleryViewModel,
+    onRequestDelete: (List<MediaItem>) -> Unit,
+) {
     Surface(tonalElevation = 3.dp) {
         Row(
             modifier = Modifier
@@ -264,7 +228,13 @@ private fun SelectionBar(state: GalleryUiState, viewModel: GalleryViewModel) {
         ) {
             Text("${state.selection.size} 项 · ${formatBytes(state.selectionBytes)}")
             Spacer(Modifier.weight(1f))
-            Button(onClick = viewModel::deleteSelected, enabled = !state.busy) {
+            Button(
+                onClick = {
+                    val picked = state.items.filter { it.id in state.selection }
+                    if (picked.isNotEmpty()) onRequestDelete(picked)
+                },
+                enabled = !state.busy,
+            ) {
                 Icon(Icons.Filled.Delete, contentDescription = null)
                 Spacer(Modifier.width(6.dp))
                 Text("删除")

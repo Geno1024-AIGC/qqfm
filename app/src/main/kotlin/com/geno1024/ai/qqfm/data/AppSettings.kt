@@ -65,6 +65,26 @@ class AppSettings(private val settings: Settings) {
         get() = settings.string(KEY_PERSIST_INDEX)?.takeIf { it.isNotBlank() }?.toBooleanStrict() ?: true
         set(value) = settings.write(strings = mapOf(KEY_PERSIST_INDEX to value.toString()))
 
+    /** The trees that were browsed last, so the picker can start from them. */
+    var selectedSources: Set<MediaSource>
+        get() = settings.string(KEY_SOURCES)
+            ?.split(',')
+            ?.mapNotNullTo(LinkedHashSet()) { MediaSource.from(it) }
+            ?: emptySet()
+        set(value) = settings.write(
+            strings = mapOf(KEY_SOURCES to value.joinToString(",") { it.id }),
+        )
+
+    /**
+     * Whether frozen images are left out of the gallery entirely.
+     *
+     * Separate from the freeze itself: pinning an image is about protecting it from a
+     * stray drag, and this is about not being distracted by the things you pinned.
+     */
+    var hideFrozen: Boolean
+        get() = settings.string(KEY_HIDE_FROZEN)?.takeIf { it.isNotBlank() }?.toBooleanStrict() ?: false
+        set(value) = settings.write(strings = mapOf(KEY_HIDE_FROZEN to value.toString()))
+
     /** Adds one deletion to the tally. */
     fun recordCleanup(files: Long, bytes: Long) {
         val nextFiles = cleanedFiles + files
@@ -88,5 +108,7 @@ class AppSettings(private val settings: Settings) {
         const val KEY_CLEANED_FILES = "cleanup.files"
         const val KEY_CLEANED_BYTES = "cleanup.bytes"
         const val KEY_PERSIST_INDEX = "gallery.persistIndex"
+        const val KEY_SOURCES = "gallery.sources"
+        const val KEY_HIDE_FROZEN = "gallery.hideFrozen"
     }
 }

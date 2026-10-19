@@ -48,8 +48,11 @@ fun AboutScreen(
     cleanedFiles: Long,
     cleanedBytes: Long,
     persistScanIndex: Boolean,
+    hideFrozen: Boolean,
+    frozenCount: Int,
     onClose: () -> Unit,
     onPersistScanIndexChange: (Boolean) -> Unit,
+    onHideFrozenChange: (Boolean) -> Unit,
 ) {
     Scaffold(
         topBar = {
@@ -160,6 +163,30 @@ fun AboutScreen(
                 Switch(
                     checked = persistScanIndex,
                     onCheckedChange = onPersistScanIndexChange,
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("隐藏已锁定的图片", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        text = if (frozenCount == 0) {
+                            "目前没有锁定的图片。"
+                        } else {
+                            "已锁定 $frozenCount 张，打开开关后它们不会出现在图库里，" +
+                                "取消隐藏即可恢复。"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Switch(
+                    checked = hideFrozen,
+                    onCheckedChange = onHideFrozenChange,
                 )
             }
 

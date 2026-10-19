@@ -17,6 +17,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.geno1024.ai.qqfm.ui.about.AboutScreen
 import com.geno1024.ai.qqfm.ui.gallery.GalleryScreen
 import com.geno1024.ai.qqfm.ui.gallery.GalleryViewModel
+import com.geno1024.ai.qqfm.ui.gallery.SourcePickerScreen
 import com.geno1024.ai.qqfm.ui.viewer.ViewerScreen
 
 @Composable
@@ -25,6 +26,7 @@ fun QqfmApp(viewModel: GalleryViewModel = viewModel()) {
     var viewerId by remember { mutableStateOf<String?>(null) }
     var viewerAnchor by remember { mutableStateOf<Int?>(null) }
     var showAbout by remember { mutableStateOf(false) }
+    var showSources by remember { mutableStateOf(false) }
 
     val items = state.items
 
@@ -39,8 +41,8 @@ fun QqfmApp(viewModel: GalleryViewModel = viewModel()) {
 
     // Hoisted out of the gallery so opening an image does not throw the scroll
     // position away with the composition: going back has to land where it left off.
-    // Keyed on the tree, so each directory remembers its own place.
-    val gridState = rememberSaveable(state.source?.id, saver = LazyGridState.Saver) {
+    // Keyed on which trees are being browsed, so each selection remembers its place.
+    val gridState = rememberSaveable(state.sourceLabel, saver = LazyGridState.Saver) {
         LazyGridState()
     }
 
@@ -50,45 +52,60 @@ fun QqfmApp(viewModel: GalleryViewModel = viewModel()) {
         if (start != null && viewerId != start.id) viewerId = start.id
     }
 
-    // The system back button mirrors the in-app back arrows: it closes the viewer
-    // and the about page before ever reaching the gallery's default exit.
+    // No tree picked yet: the picker is the whole screen, with nowhere to go back to.
+    val choosingSources = showSources || state.sources.isEmpty()
+
     BackHandler(enabled = showAbout) { showAbout = false }
-    BackHandler(enabled = !showAbout && start != null) { viewerId = null }
+    BackHandler(enabled = showSources && state.sources.isNotEmpty()) { showSources = false }
+    BackHandler(enabled = !showAbout && !showSources && start != null) { viewerId = null }
 
     Box(Modifier.fillMaxSize()) {
-        if (showAbout) {
-            AboutScreen(
+        when {
+            showAbout -> AboutScreen(
                 cleanedFiles = state.cleanedFiles,
                 cleanedBytes = state.cleanedBytes,
                 persistScanIndex = state.persistScanIndex,
+                hideFrozen = state.hideFrozen,
+                frozenCount = state.frozen.size,
                 onClose = { showAbout = false },
                 onPersistScanIndexChange = viewModel::setPersistScanIndex,
+                onHideFrozenChange = viewModel::setHideFrozen,
             )
-        } else {
-            // The gallery stays composed underneath the viewer on purpose: swapping
-            // the two would drop every grid cell, and coming back would restart their
-            // thumbnail loads, showing a wave of spinners over images already decoded.
-            GalleryScreen(
-                state = state,
-                viewModel = viewModel,
-                gridState = gridState,
-                onOpen = { viewerId = it.id },
-                onOpenAbout = { showAbout = true },
+            choosingSources -> SourcePickerScreen(
+                initial = if (showSources) state.sources else viewModel.rememberedSources(),
+                onConfirm = { chosen ->
+                    showSources = false
+                    viewModel.chooseSources(chosen)
+                },
+                onCancel = if (state.sources.isEmpty()) null else ({ showSources = false }),
             )
-
-            if (start != null) {
-                ViewerScreen(
-                    items = items,
-                    start = start,
-                    imageStore = viewModel.imageStore,
-                    frozenIds = state.frozen,
-                    onClose = { viewerId = null },
-                    onDelete = { item, index ->
-                        viewerAnchor = index
-                        viewModel.deleteOne(item)
-                    },
-                    onToggleFrozen = { viewModel.toggleFrozen(it.id) },
+            else -> {
+                // The gallery stays composed underneath the viewer on purpose: swapping
+                // the two would drop every grid cell, and coming back would restart their
+                // thumbnail loads, showing a wave of spinners over images already decoded.
+                GalleryScreen(
+                    state = state,
+                    viewModel = viewModel,
+                    gridState = gridState,
+                    onOpen = { viewerId = it.id },
+                    onOpenAbout = { showAbout = true },
+                    onOpenSources = { showSources = true },
                 )
+
+                if (start != null) {
+                    ViewerScreen(
+                        items = items,
+                        start = start,
+                        imageStore = viewModel.imageStore,
+                        frozenIds = state.frozen,
+                        onClose = { viewerId = null },
+                        onDelete = { item, index ->
+                            viewerAnchor = index
+                            viewModel.deleteOne(item)
+                        },
+                        onToggleFrozen = { viewModel.toggleFrozen(it.id) },
+                    )
+                }
             }
         }
     }
