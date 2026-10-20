@@ -156,21 +156,21 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun republish() {
-        val items = visibleItems()
-        rawItems = items
-        byId = items.associateBy { it.id }
-        _state.update {
-            it.copy(
-                items = sort(items, it.sortMode),
-                totalBytes = items.sumOf { item -> item.size },
-                selection = it.selection intersect items.mapTo(HashSet()) { entry -> entry.id },
-                selectionBytes = bytesOf(_state.value.selection),
+        // [rawItems] stays the whole scan: hiding frozen images filters what is shown,
+        // it never forgets them. Otherwise turning the filter back off could not bring
+        // them back, and the count would keep shrinking on every republish.
+        val visible = visibleItemsOf(rawItems)
+        byId = rawItems.associateBy { it.id }
+        _state.update { state ->
+            val selection = state.selection intersect visible.mapTo(HashSet()) { entry -> entry.id }
+            state.copy(
+                items = sort(visible, state.sortMode),
+                totalBytes = visible.sumOf { item -> item.size },
+                selection = selection,
+                selectionBytes = bytesOf(selection),
             ).withRows()
         }
     }
-
-    /** The scan minus whatever the user has hidden. */
-    private fun visibleItems(): List<MediaItem> = visibleItemsOf(rawItems)
 
     private fun visibleItemsOf(items: List<MediaItem>): List<MediaItem> {
         val frozen = _state.value.frozen
@@ -217,8 +217,10 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     private fun applyItems(items: List<MediaItem>, fromScan: Boolean) {
         val visible = visibleItemsOf(items)
-        rawItems = visible
-        byId = visible.associateBy { it.id }
+        // Keep the unscanned-for-nothing truth: [rawItems] carries every scanned item,
+        // and the frozen filter only decides what gets published.
+        rawItems = items
+        byId = items.associateBy { it.id }
         _state.update {
             it.copy(
                 items = sort(visible, it.sortMode),
@@ -236,8 +238,12 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     fun setSortMode(mode: SortMode) {
         endDrag()
         _state.update {
-            it.copy(sortMode = mode, items = sort(rawItems, mode), selection = emptySet(), selectionBytes = 0L)
-                .withRows()
+            it.copy(
+                sortMode = mode,
+                items = sort(visibleItemsOf(rawItems), mode),
+                selection = emptySet(),
+                selectionBytes = 0L,
+            ).withRows()
         }
     }
 
@@ -349,7 +355,11 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             val removed = selected.mapTo(HashSet()) { it.id }
             withContext(Dispatchers.IO) { forgetInIndex(selected, removed) }
             publishItems(
-                "已删除 ${result.filesRemoved} 张图片，释放约 " + formatBytes(result.bytesReclaimed),
+                if (result.errorMessage != null) {
+                    result.errorMessage
+                } else {
+                    "已删除 ${result.filesRemoved} 张图片，释放约 " + formatBytes(result.bytesReclaimed)
+                },
                 removed,
                 emptySet(),
             )
@@ -369,7 +379,11 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             recordCleanup(result)
             withContext(Dispatchers.IO) { forgetInIndex(listOf(item), setOf(item.id)) }
             publishItems(
-                "已删除 ${result.filesRemoved} 张图片，释放约 " + formatBytes(result.bytesReclaimed),
+                if (result.errorMessage != null) {
+                    result.errorMessage
+                } else {
+                    "已删除 ${result.filesRemoved} 张图片，释放约 " + formatBytes(result.bytesReclaimed)
+                },
                 setOf(item.id),
                 _state.value.selection - item.id,
             )
@@ -402,14 +416,15 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             )
         }
         val published = withContext(Dispatchers.Default) {
-            val remaining = visibleItemsOf(rawItems).filterNot { it.id in removedIds }
+            val remaining = rawItems.filterNot { it.id in removedIds }
             rawItems = remaining
             byId = remaining.associateBy { it.id }
-            val sorted = sort(remaining, snapshot.sortMode)
+            val visible = visibleItemsOf(remaining)
+            val sorted = sort(visible, snapshot.sortMode)
             Published(
                 items = sorted,
                 displayRows = buildRows(sorted, snapshot.sortMode, snapshot.collapsed),
-                totalBytes = remaining.sumOf { item -> item.size },
+                totalBytes = visible.sumOf { item -> item.size },
             )
         }
         _state.update {

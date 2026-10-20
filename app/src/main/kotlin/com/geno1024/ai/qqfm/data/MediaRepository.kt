@@ -18,7 +18,11 @@ class MediaRepository(
         val totalBytes: Long,
     )
 
-    data class DeleteResult(val filesRemoved: Long, val bytesReclaimed: Long)
+    data class DeleteResult(
+        val filesRemoved: Long,
+        val bytesReclaimed: Long,
+        val errorMessage: String? = null,
+    )
 
     private fun cacheFile(source: MediaSource): File = File(context.cacheDir, "scan-${source.id}.tsv")
 
@@ -156,8 +160,13 @@ class MediaRepository(
     fun delete(items: List<MediaItem>, onProgress: (Int) -> Unit = {}): DeleteResult {
         if (items.isEmpty()) return DeleteResult(0L, 0L)
         val candidates = items.map { item -> item.path }.distinct()
+        // What the shell says it removed is only trusted when it names a path we asked
+        // for. The set is the boundary: if anything else turns up, count it as an
+        // anomaly instead of reporting a deletion the caller never requested.
+        val wanted = candidates.toHashSet()
         val batches = candidates.chunked(128)
         val present = HashSet<String>(candidates.size)
+        var unexpected = 0
         var done = 0
         batches.forEach { batch ->
             val args = batch.joinToString(" ") { RootShell.shellQuote(it) }
@@ -166,12 +175,19 @@ class MediaRepository(
             RootShell.forEachLineInSession(
                 "for p in $args; do if [ -f \"\$p\" ]; then printf '%s\\n' \"\$p\"; " +
                     "rm -f -- \"\$p\"; fi; done 2>/dev/null",
-            ) { line -> present.add(line) }
+            ) { line ->
+                if (line in wanted) present.add(line) else unexpected++
+            }
             done++
             onProgress(done)
         }
         val reclaimed = items.filter { it.path in present }.sumOf { it.size }
-        return DeleteResult(present.size.toLong(), reclaimed)
+        val error = if (unexpected > 0) {
+            "删除结果异常：有 $unexpected 个非目标路径被报告，已停止计数"
+        } else {
+            null
+        }
+        return DeleteResult(present.size.toLong(), reclaimed, error)
     }
 }
 

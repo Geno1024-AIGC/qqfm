@@ -37,7 +37,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -158,11 +157,16 @@ fun ViewerScreen(
         }
     }
 
-    var lastCount by remember { mutableIntStateOf(items.size) }
-    LaunchedEffect(items.size) {
-        val gone = lastCount - items.size
-        lastCount = items.size
-        if (gone > 0) showNotice("已删除 $gone 张")
+    // The size also moves when the gallery republishes for other reasons, so a plain
+    // difference would report deletions that never happened. Only the id we actually
+    // asked to delete earns a notice.
+    var pendingDeleteId by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(items.size, pendingDeleteId) {
+        val pending = pendingDeleteId ?: return@LaunchedEffect
+        if (items.none { it.id == pending }) {
+            pendingDeleteId = null
+            showNotice("已删除 1 张")
+        }
     }
 
     // The file on screen comes from one exact path, so the deletion is confirmed by
@@ -202,6 +206,7 @@ fun ViewerScreen(
                                 showNotice("这张已冻结，解锁后才能删除")
                                 return@IconButton
                             }
+                            pendingDeleteId = item.id
                             onDelete(item, pagerState.currentPage)
                         },
                         enabled = !deleting,
