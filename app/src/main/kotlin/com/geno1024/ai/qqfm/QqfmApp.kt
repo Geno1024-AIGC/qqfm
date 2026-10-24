@@ -14,6 +14,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.geno1024.ai.qqfm.data.OcrScanBus
 import com.geno1024.ai.qqfm.ui.about.AboutScreen
 import com.geno1024.ai.qqfm.ui.gallery.GalleryScreen
 import com.geno1024.ai.qqfm.ui.gallery.GalleryViewModel
@@ -23,6 +24,7 @@ import com.geno1024.ai.qqfm.ui.viewer.ViewerScreen
 @Composable
 fun QqfmApp(viewModel: GalleryViewModel = viewModel()) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val ocrScan by OcrScanBus.state.collectAsStateWithLifecycle()
     var viewerId by remember { mutableStateOf<String?>(null) }
     var viewerAnchor by remember { mutableStateOf<Int?>(null) }
     var showAbout by remember { mutableStateOf(false) }
@@ -55,6 +57,12 @@ fun QqfmApp(viewModel: GalleryViewModel = viewModel()) {
     // No tree picked yet: the picker is the whole screen, with nowhere to go back to.
     val choosingSources = showSources || state.sources.isEmpty()
 
+    // The service writes to the OCR database behind the view model's back; while the
+    // about page is open, keep its count in step without polling every picture.
+    LaunchedEffect(showAbout, ocrScan.status, ocrScan.done / 25) {
+        if (showAbout) viewModel.refreshOcrCount()
+    }
+
     BackHandler(enabled = showAbout) { showAbout = false }
     BackHandler(enabled = showSources && state.sources.isNotEmpty()) { showSources = false }
     BackHandler(enabled = !showAbout && !showSources && start != null) { viewerId = null }
@@ -67,9 +75,15 @@ fun QqfmApp(viewModel: GalleryViewModel = viewModel()) {
                 persistScanIndex = state.persistScanIndex,
                 hideFrozen = state.hideFrozen,
                 frozenCount = state.frozen.size,
+                ocrIndexed = state.ocrIndexed,
+                ocrScan = ocrScan,
                 onClose = { showAbout = false },
                 onPersistScanIndexChange = viewModel::setPersistScanIndex,
                 onHideFrozenChange = viewModel::setHideFrozen,
+                onClearOcr = viewModel::clearOcrIndex,
+                onStartOcr = viewModel::startOcrScan,
+                onPauseOcr = viewModel::pauseOcrScan,
+                onStopOcr = viewModel::stopOcrScan,
             )
             choosingSources -> SourcePickerScreen(
                 initial = if (showSources) state.sources else viewModel.rememberedSources(),
@@ -104,6 +118,8 @@ fun QqfmApp(viewModel: GalleryViewModel = viewModel()) {
                             viewModel.deleteOne(item)
                         },
                         onToggleFrozen = { viewModel.toggleFrozen(it.id) },
+                        onEnsureOcr = viewModel::ensureOcr,
+                        onRequestOcr = viewModel::requestOcrText,
                     )
                 }
             }

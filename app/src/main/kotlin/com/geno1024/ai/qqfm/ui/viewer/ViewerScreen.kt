@@ -1,6 +1,9 @@
 package com.geno1024.ai.qqfm.ui.viewer
 
 import android.graphics.drawable.Animatable
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.os.SystemClock
 import android.widget.ImageView
 import androidx.compose.foundation.Image
@@ -13,18 +16,22 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -32,6 +39,7 @@ import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -55,6 +63,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -77,6 +86,8 @@ fun ViewerScreen(
     onClose: () -> Unit,
     onDelete: (MediaItem, Int) -> Unit,
     onToggleFrozen: (MediaItem) -> Unit,
+    onEnsureOcr: (MediaItem) -> Unit,
+    onRequestOcr: (MediaItem, (String?) -> Unit) -> Unit,
 ) {
     val startPage = remember(start.id) {
         items.indexOfFirst { it.id == start.id }.coerceAtLeast(0)
@@ -148,6 +159,7 @@ fun ViewerScreen(
     // The snackbar lives in the gallery, which sits behind the viewer, so anything
     // the viewer needs to say it says itself.
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     var notice by remember { mutableStateOf<String?>(null) }
     fun showNotice(text: String) {
         scope.launch {
@@ -168,6 +180,9 @@ fun ViewerScreen(
             showNotice("已删除 1 张")
         }
     }
+
+    var ocrText by remember { mutableStateOf<String?>(null) }
+    var ocrLoading by remember { mutableStateOf(false) }
 
     // The file on screen comes from one exact path, so the deletion is confirmed by
     // naming it: browsing several trees at once makes "which one is this" worth
@@ -196,6 +211,21 @@ fun ViewerScreen(
                             contentDescription = if (currentFrozen) "取消冻结" else "冻结",
                             tint = if (currentFrozen) MaterialTheme.colorScheme.primary else LocalContentColor.current,
                         )
+                    }
+                    IconButton(
+                        onClick = {
+                            val item = items.getOrNull(pagerState.currentPage) ?: return@IconButton
+                            if (ocrLoading) return@IconButton
+                            ocrLoading = true
+                            showNotice("识别中…")
+                            onRequestOcr(item) { text ->
+                                ocrLoading = false
+                                ocrText = text?.takeIf { it.isNotBlank() } ?: "(没有识别到文字)"
+                            }
+                        },
+                        enabled = !ocrLoading,
+                    ) {
+                        Text("文", style = MaterialTheme.typography.titleMedium)
                     }
                     IconButton(
                         onClick = {
@@ -234,6 +264,7 @@ fun ViewerScreen(
                 modifier = Modifier.fillMaxSize(),
             ) { page ->
                 val item = items.getOrNull(page) ?: return@HorizontalPager
+                LaunchedEffect(item.id) { onEnsureOcr(item) }
                 val loaded by produceState<LoadedImage?>(initialValue = null, key1 = item.id) {
                     value = imageStore.viewer(item, 2048)
                 }
@@ -351,6 +382,32 @@ fun ViewerScreen(
                 )
             }
         }
+    }
+
+    val shownText = ocrText
+    if (shownText != null) {
+        AlertDialog(
+            onDismissRequest = { ocrText = null },
+            title = { Text("识别到的文字") },
+            text = {
+                Box(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
+                    Text(shownText)
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { ocrText = null }) { Text("关闭") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        clipboard.setPrimaryClip(ClipData.newPlainText("QQFM OCR", shownText))
+                        ocrText = null
+                        showNotice("已复制")
+                    },
+                ) { Text("复制") }
+            },
+        )
     }
 }
 

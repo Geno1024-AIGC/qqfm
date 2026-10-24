@@ -50,6 +50,25 @@ class ImageStore(private val context: Context) {
     suspend fun thumbnail(item: MediaItem, targetPx: Int): Bitmap? = load(item, targetPx, "t$targetPx")
 
     /**
+     * A still bitmap sized for OCR.
+     *
+     * Recognition does not need the full picture; 1600 px on the long edge keeps
+     * small print legible while cutting the decode and the model's work roughly in
+     * half compared with the viewer's size.
+     */
+    suspend fun ocrBitmap(item: MediaItem, targetPx: Int = 1600): Bitmap? =
+        load(item, targetPx, "o$targetPx")
+
+    /**
+     * Decodes a file the scanner already copied into app-private storage.
+     *
+     * The full-library pass batches files out of the root-only cache with one `cp`
+     * per batch; decoding those local copies avoids a `su` per picture.
+     */
+    fun decodeLocalForOcr(file: File, targetPx: Int = 1280): Bitmap? =
+        decodeFile(file, targetPx)
+
+    /**
      * Decodes an image for the viewer, keeping motion when there is any.
      *
      * A still goes through the shared bitmap path, which downsamples and caches. An

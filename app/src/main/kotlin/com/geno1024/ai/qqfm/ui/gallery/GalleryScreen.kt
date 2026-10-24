@@ -1,6 +1,7 @@
 package com.geno1024.ai.qqfm.ui.gallery
 
 import android.graphics.Bitmap
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -23,6 +24,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
@@ -34,6 +36,7 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -50,6 +53,8 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -61,6 +66,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -85,6 +92,11 @@ fun GalleryScreen(
     onOpenSources: () -> Unit,
 ) {
     val snackbarHostState = remember { SnackbarHostState() }
+    var searching by remember { mutableStateOf(false) }
+    BackHandler(enabled = searching) {
+        searching = false
+        viewModel.setSearchQuery("")
+    }
     // Held here rather than in the view model: it is a question about this screen, and
     // it has to survive recompositions while the grid redraws underneath it.
     LaunchedEffect(state.message) {
@@ -95,7 +107,16 @@ fun GalleryScreen(
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
-        topBar = { GalleryTopBar(state, viewModel, onOpenAbout, onOpenSources) },
+        topBar = {
+            GalleryTopBar(
+                state = state,
+                viewModel = viewModel,
+                onOpenAbout = onOpenAbout,
+                onOpenSources = onOpenSources,
+                searching = searching,
+                onSearchingChange = { searching = it },
+            )
+        },
         bottomBar = {
             if (state.selectionActive) SelectionBar(state, viewModel)
         },
@@ -110,7 +131,15 @@ fun GalleryScreen(
                         Text("已发现 ${state.scannedCount} 张")
                     }
                 }
-                state.items.isEmpty() -> Centered { Text("没有找到图片") }
+                state.items.isEmpty() -> Centered {
+                    Text(
+                        if (state.searchQuery.isNotBlank()) {
+                            "没有匹配的文字\n只搜索已经打开过的图片"
+                        } else {
+                            "没有找到图片"
+                        },
+                    )
+                }
                 else -> GalleryGrid(state, viewModel, gridState, onOpen)
             }
             if (state.scanning) {
@@ -131,41 +160,73 @@ private fun GalleryTopBar(
     viewModel: GalleryViewModel,
     onOpenAbout: () -> Unit,
     onOpenSources: () -> Unit,
+    searching: Boolean,
+    onSearchingChange: (Boolean) -> Unit,
 ) {
+    val searchFocus = remember { FocusRequester() }
+    LaunchedEffect(searching) {
+        if (searching) searchFocus.requestFocus()
+    }
     TopAppBar(
         title = {
-            if (state.selectionActive) {
-                Text("已选 ${state.selection.size} 项")
-            } else {
-                Text("${state.items.size} 张")
+            when {
+                searching -> TextField(
+                    value = state.searchQuery,
+                    onValueChange = viewModel::setSearchQuery,
+                    placeholder = { Text("搜索图片里的文字") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().focusRequester(searchFocus),
+                    colors = TextFieldDefaults.colors(
+                        focusedContainerColor = Color.Transparent,
+                        unfocusedContainerColor = Color.Transparent,
+                        focusedIndicatorColor = Color.Transparent,
+                        unfocusedIndicatorColor = Color.Transparent,
+                    ),
+                )
+                state.selectionActive -> Text("已选 ${state.selection.size} 项")
+                else -> Text("${state.items.size} 张")
             }
         },
         navigationIcon = {
-            if (state.selectionActive) {
-                IconButton(onClick = viewModel::clearSelection) {
+            when {
+                searching -> IconButton(
+                    onClick = {
+                        onSearchingChange(false)
+                        viewModel.setSearchQuery("")
+                    },
+                ) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "退出搜索")
+                }
+                state.selectionActive -> IconButton(onClick = viewModel::clearSelection) {
                     Icon(Icons.Filled.Close, contentDescription = "取消选择")
                 }
-            } else {
-                IconButton(onClick = onOpenSources) {
+                else -> IconButton(onClick = onOpenSources) {
                     Icon(Icons.Filled.ArrowDropDown, contentDescription = "切换目录")
                 }
             }
         },
         actions = {
-            if (state.selectionActive) {
-                IconButton(onClick = viewModel::selectAll) {
-                    Icon(Icons.Filled.Done, contentDescription = "全选")
+            when {
+                searching -> Unit
+                state.selectionActive -> {
+                    IconButton(onClick = viewModel::selectAll) {
+                        Icon(Icons.Filled.Done, contentDescription = "全选")
+                    }
+                    IconButton(onClick = viewModel::deleteSelected, enabled = !state.busy) {
+                        Icon(Icons.Filled.Delete, contentDescription = "删除")
+                    }
                 }
-                IconButton(onClick = viewModel::deleteSelected, enabled = !state.busy) {
-                    Icon(Icons.Filled.Delete, contentDescription = "删除")
-                }
-            } else {
-                SortMenu(state.sortMode, viewModel::setSortMode)
-                IconButton(onClick = viewModel::refresh, enabled = !state.scanning) {
-                    Icon(Icons.Filled.Refresh, contentDescription = "重新扫描")
-                }
-                IconButton(onClick = onOpenAbout) {
-                    Icon(Icons.Filled.Info, contentDescription = "关于")
+                else -> {
+                    IconButton(onClick = { onSearchingChange(true) }) {
+                        Icon(Icons.Filled.Search, contentDescription = "搜索文字")
+                    }
+                    SortMenu(state.sortMode, viewModel::setSortMode)
+                    IconButton(onClick = viewModel::refresh, enabled = !state.scanning) {
+                        Icon(Icons.Filled.Refresh, contentDescription = "重新扫描")
+                    }
+                    IconButton(onClick = onOpenAbout) {
+                        Icon(Icons.Filled.Info, contentDescription = "关于")
+                    }
                 }
             }
         },

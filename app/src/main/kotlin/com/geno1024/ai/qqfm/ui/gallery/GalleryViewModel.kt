@@ -8,7 +8,12 @@ import com.geno1024.ai.qqfm.data.ImageStore
 import com.geno1024.ai.qqfm.data.MediaItem
 import com.geno1024.ai.qqfm.data.MediaRepository
 import com.geno1024.ai.qqfm.data.MediaSource
+import com.geno1024.ai.qqfm.data.OcrEngine
+import com.geno1024.ai.qqfm.data.OcrIndex
+import com.geno1024.ai.qqfm.data.OcrScanBus
+import com.geno1024.ai.qqfm.data.OcrScanStatus
 import com.geno1024.ai.qqfm.data.RootShell
+import com.geno1024.ai.qqfm.ocr.OcrScanService
 import com.geno1024.ai.qqfm.ui.formatBytes
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -57,6 +62,10 @@ data class GalleryUiState(
     val cleanedBytes: Long = 0L,
     val persistScanIndex: Boolean = true,
     val hideFrozen: Boolean = false,
+    val searchQuery: String = "",
+    /** Ids whose OCR text contains [searchQuery]; null when no search is active. */
+    val ocrMatches: Set<String>? = null,
+    val ocrIndexed: Int = 0,
     val selection: Set<String> = emptySet(),
     val selectionBytes: Long = 0L,
     val busy: Boolean = false,
@@ -75,6 +84,12 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private val repository = MediaRepository(application) { settings.persistScanIndex }
     val imageStore = ImageStore(application)
 
+    private val ocrIndex = OcrIndex(application)
+    /** Built on first use: the model and its native libraries are not needed to browse. */
+    private var ocrEngine: OcrEngine? = null
+    /** Guards against starting the same picture twice while its first pass runs. */
+    private val ocrInFlight = HashSet<String>()
+
     private val _state = MutableStateFlow(GalleryUiState())
     val state: StateFlow<GalleryUiState> = _state.asStateFlow()
 
@@ -85,6 +100,9 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private var dragPinned: Set<String> = emptySet()
 
     init {
+        // Restores a pass paused by a previous process before the first frame, so the
+        // about page opens showing the real state instead of a blank idle.
+        OcrScanBus.attach(application)
         viewModelScope.launch {
             _state.update {
                 it.copy(
@@ -96,7 +114,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 )
             }
             val root = withContext(Dispatchers.IO) { RootShell.isRootAvailable() }
-            _state.update { it.copy(rootAvailable = root, loading = false) }
+            val indexed = withContext(Dispatchers.IO) { ocrIndex.count() }
+            _state.update { it.copy(rootAvailable = root, loading = false, ocrIndexed = indexed) }
         }
     }
 
@@ -155,11 +174,141 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         if (_state.value.sources.isNotEmpty()) republish()
     }
 
+    /**
+     * Filters the gallery by the text OCR has read out of the pictures.
+     *
+     * An empty query means no filter. The match set is computed off the main thread
+     * and then the grid is rebuilt in one go, so typing does not stall on sorting
+     * 165k entries.
+     */
+    fun setSearchQuery(query: String) {
+        _state.update { it.copy(searchQuery = query) }
+        viewModelScope.launch {
+            val trimmed = query.trim()
+            val matches = withContext(Dispatchers.IO) {
+                if (trimmed.isEmpty()) null else ocrIndex.search(trimmed)
+            }
+            // Typing fires one query per keystroke; a slow early one must not overwrite
+            // the results of a later, shorter query.
+            var current = false
+            _state.update {
+                current = it.searchQuery.trim() == trimmed
+                if (current) it.copy(ocrMatches = matches) else it
+            }
+            if (current) publishFiltered()
+        }
+    }
+
+    private fun publishFiltered() {
+        viewModelScope.launch {
+            val snapshot = _state.value
+            val published = withContext(Dispatchers.Default) {
+                val visible = searchFiltered(visibleItemsOf(rawItems), snapshot)
+                val sorted = sort(visible, snapshot.sortMode)
+                Published(
+                    items = sorted,
+                    displayRows = buildRows(sorted, snapshot.sortMode, snapshot.collapsed),
+                    totalBytes = visible.sumOf { item -> item.size },
+                )
+            }
+            _state.update { state ->
+                val visibleIds = published.items.mapTo(HashSet()) { it.id }
+                val selection = state.selection intersect visibleIds
+                state.copy(
+                    items = published.items,
+                    displayRows = published.displayRows,
+                    totalBytes = published.totalBytes,
+                    selection = selection,
+                    selectionBytes = bytesOf(selection),
+                )
+            }
+        }
+    }
+
+    /**
+     * Reads the text out of one picture and files it away, once.
+     *
+     * Called whenever an image is opened: the first pass costs a decode plus a model
+     * run, later opens hit the index. A picture already being recognized is skipped
+     * rather than queued twice.
+     */
+    private fun engine(): OcrEngine = ocrEngine ?: OcrEngine().also { ocrEngine = it }
+
+    fun ensureOcr(item: MediaItem) {
+        if (!ocrInFlight.add(item.id)) return
+        viewModelScope.launch {
+            try {
+                if (withContext(Dispatchers.IO) { ocrIndex.contains(item.id) }) return@launch
+                val bitmap = imageStore.ocrBitmap(item) ?: return@launch
+                val text = runCatching { engine().recognize(bitmap) }.getOrNull() ?: return@launch
+                withContext(Dispatchers.IO) { ocrIndex.put(item.id, text) }
+                val total = withContext(Dispatchers.IO) { ocrIndex.count() }
+                _state.update { it.copy(ocrIndexed = total) }
+            } finally {
+                ocrInFlight.remove(item.id)
+            }
+        }
+    }
+
+    /** Hands back the recognized text, running OCR first when it has not been done. */
+    fun requestOcrText(item: MediaItem, onReady: (String?) -> Unit) {
+        viewModelScope.launch {
+            val cached = withContext(Dispatchers.IO) { ocrIndex.textOf(item.id) }
+            if (!cached.isNullOrBlank()) {
+                onReady(cached)
+                return@launch
+            }
+            val bitmap = imageStore.ocrBitmap(item)
+            if (bitmap == null) {
+                onReady(null)
+                return@launch
+            }
+            val text = runCatching { engine().recognize(bitmap) }.getOrNull()
+            if (text != null) {
+                withContext(Dispatchers.IO) { ocrIndex.put(item.id, text) }
+                val total = withContext(Dispatchers.IO) { ocrIndex.count() }
+                _state.update { it.copy(ocrIndexed = total) }
+            }
+            onReady(text)
+        }
+    }
+
+    /** Starts the full-library pass, or starts over once the last one finished. */
+    fun startOcrScan() {
+        if (OcrScanBus.state.value.status == OcrScanStatus.DONE) OcrScanBus.reset()
+        OcrScanService.start(getApplication())
+    }
+
+    fun pauseOcrScan() = OcrScanService.pause(getApplication())
+
+    fun stopOcrScan() = OcrScanService.stop(getApplication())
+
+    /** The service writes to the same database; refresh the count as it progresses. */
+    fun refreshOcrCount() {
+        viewModelScope.launch {
+            val total = withContext(Dispatchers.IO) { ocrIndex.count() }
+            _state.update { if (it.ocrIndexed == total) it else it.copy(ocrIndexed = total) }
+        }
+    }
+
+    fun clearOcrIndex() {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { ocrIndex.clear() }
+            _state.update { it.copy(ocrIndexed = 0, ocrMatches = if (it.searchQuery.isBlank()) null else emptySet()) }
+            publishFiltered()
+        }
+    }
+
+    override fun onCleared() {
+        ocrEngine?.close()
+        super.onCleared()
+    }
+
     private fun republish() {
         // [rawItems] stays the whole scan: hiding frozen images filters what is shown,
         // it never forgets them. Otherwise turning the filter back off could not bring
         // them back, and the count would keep shrinking on every republish.
-        val visible = visibleItemsOf(rawItems)
+        val visible = searchFiltered(visibleItemsOf(rawItems), _state.value)
         byId = rawItems.associateBy { it.id }
         _state.update { state ->
             val selection = state.selection intersect visible.mapTo(HashSet()) { entry -> entry.id }
@@ -176,6 +325,13 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         val frozen = _state.value.frozen
         val hide = _state.value.hideFrozen
         return if (hide && frozen.isNotEmpty()) items.filterNot { it.id in frozen } else items
+    }
+
+    /** The part of an empty search query that still lets tasks run unchanged. */
+    private fun searchFiltered(items: List<MediaItem>, state: GalleryUiState): List<MediaItem> {
+        if (state.searchQuery.isBlank()) return items
+        val matches = state.ocrMatches ?: return emptyList()
+        return items.filter { it.id in matches }
     }
 
     /**
@@ -216,7 +372,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun applyItems(items: List<MediaItem>, fromScan: Boolean) {
-        val visible = visibleItemsOf(items)
+        val visible = searchFiltered(visibleItemsOf(items), _state.value)
         // Keep the unscanned-for-nothing truth: [rawItems] carries every scanned item,
         // and the frozen filter only decides what gets published.
         rawItems = items
@@ -240,7 +396,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         _state.update {
             it.copy(
                 sortMode = mode,
-                items = sort(visibleItemsOf(rawItems), mode),
+                items = sort(searchFiltered(visibleItemsOf(rawItems), it), mode),
                 selection = emptySet(),
                 selectionBytes = 0L,
             ).withRows()
@@ -419,7 +575,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             val remaining = rawItems.filterNot { it.id in removedIds }
             rawItems = remaining
             byId = remaining.associateBy { it.id }
-            val visible = visibleItemsOf(remaining)
+            val visible = searchFiltered(visibleItemsOf(remaining), snapshot)
             val sorted = sort(visible, snapshot.sortMode)
             Published(
                 items = sorted,

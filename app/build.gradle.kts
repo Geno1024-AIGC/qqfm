@@ -33,6 +33,12 @@ android {
         targetSdk = 37
         versionCode = stamp.versionCode
         versionName = stamp.versionName
+
+        // ML Kit ships one native OCR pipeline per ABI; the phones this targets are
+        // ARM, so dropping the x86 copies keeps ~23 MB out of every download.
+        ndk {
+            abiFilters += setOf("arm64-v8a", "armeabi-v7a")
+        }
     }
 
     compileOptions {
@@ -104,6 +110,10 @@ dependencies {
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.lifecycle.runtime.compose)
+
+    // Bundled Chinese recognizer: the target device has no Play services, so the
+    // model has to travel inside the APK rather than be downloaded on demand.
+    implementation(libs.mlkit.text.recognition.chinese)
 
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)

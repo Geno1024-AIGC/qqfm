@@ -4,6 +4,9 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application
         android:allowBackup="true"
@@ -22,6 +25,17 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+            Reads text out of every cached picture. This is a foreground service
+            because a pass over hundreds of thousands of files outlives the screen;
+            on Android 15+ the dataSync type carries a time limit, and the persisted
+            cursor is what lets the pass pick up again after the system stops it.
+        -->
+        <service
+            android:name=".ocr.OcrScanService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
 
         <!--
             How an install is reported. The first action is what a package installer
