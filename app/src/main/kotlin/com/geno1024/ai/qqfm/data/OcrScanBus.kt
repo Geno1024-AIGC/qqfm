@@ -26,6 +26,8 @@ data class OcrScanProgress(
     val failures: Int = 0,
     val activeMillis: Long = 0L,
     val runningSince: Long? = null,
+    /** True while this pass only reads pictures that have no index entry yet. */
+    val backfill: Boolean = false,
 ) {
     fun elapsedMillis(now: Long = SystemClock.elapsedRealtime()): Long =
         activeMillis + if (status == OcrScanStatus.RUNNING && runningSince != null) {
@@ -52,6 +54,7 @@ object OcrScanBus {
     private const val KEY_ACTIVE = "activeMillis"
     private const val KEY_CURSOR = "cursor"
     private const val KEY_SOURCES = "sources"
+    private const val KEY_BACKFILL = "backfill"
 
     private val _state = MutableStateFlow(OcrScanProgress())
     val state: StateFlow<OcrScanProgress> = _state.asStateFlow()
@@ -84,6 +87,7 @@ object OcrScanBus {
             failures = store.getInt(KEY_FAILURES, 0),
             activeMillis = store.getLong(KEY_ACTIVE, 0L),
             runningSince = null,
+            backfill = store.getBoolean(KEY_BACKFILL, false),
         )
     }
 
@@ -107,7 +111,7 @@ object OcrScanBus {
     fun sources(): Set<MediaSource> = sourcesValue
 
     @Synchronized
-    fun begin(total: Int, sources: Set<MediaSource>) {
+    fun begin(total: Int, sources: Set<MediaSource>, backfill: Boolean = false) {
         cursorValue = 0
         sourcesValue = sources
         sincePersist = 0
@@ -118,6 +122,7 @@ object OcrScanBus {
             failures = 0,
             activeMillis = 0L,
             runningSince = SystemClock.elapsedRealtime(),
+            backfill = backfill,
         )
         persistLocked()
     }
@@ -192,6 +197,7 @@ object OcrScanBus {
             .putLong(KEY_ACTIVE, now.elapsedMillis())
             .putInt(KEY_CURSOR, cursorValue)
             .putStringSet(KEY_SOURCES, sourcesValue.mapTo(HashSet()) { it.id })
+            .putBoolean(KEY_BACKFILL, now.backfill)
             .apply()
     }
 }

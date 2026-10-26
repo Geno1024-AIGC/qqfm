@@ -81,6 +81,7 @@ fun AboutScreen(
     onPauseOcr: () -> Unit,
     onStopOcr: () -> Unit,
     onRestartOcr: () -> Unit,
+    onBackfillOcr: () -> Unit,
 ) {
     val context = LocalContext.current
     val notificationPermission = rememberLauncherForActivityResult(
@@ -283,10 +284,18 @@ fun AboutScreen(
             ) {
                 Text(
                     text = when (ocrScan.status) {
-                        OcrScanStatus.IDLE -> "尚未开始。全库识别会遍历所选目录的图片，为搜索建立文字索引。"
-                        OcrScanStatus.RUNNING -> "正在识别…"
-                        OcrScanStatus.PAUSED -> "已暂停，进度已保存，可以从断点继续。"
-                        OcrScanStatus.DONE -> "上次识别已完成。"
+                        OcrScanStatus.IDLE ->
+                            "尚未开始。全库识别会遍历所选目录的图片，为搜索建立文字索引。"
+                        OcrScanStatus.RUNNING ->
+                            if (ocrScan.backfill) "正在补齐未识别的图片…" else "正在识别…"
+                        OcrScanStatus.PAUSED ->
+                            if (ocrScan.backfill) {
+                                "补齐已暂停，进度已保存，可以从断点继续。"
+                            } else {
+                                "已暂停，进度已保存，可以从断点继续。"
+                            }
+                        OcrScanStatus.DONE ->
+                            if (ocrScan.backfill) "上次补齐已完成。" else "上次识别已完成。"
                     },
                     style = MaterialTheme.typography.bodyMedium,
                 )
@@ -341,6 +350,11 @@ fun AboutScreen(
                                 Text(if (ocrScan.status == OcrScanStatus.DONE) "重新识别" else "开始识别")
                             }
                         }
+                    }
+                }
+                if (ocrScan.status != OcrScanStatus.RUNNING) {
+                    TextButton(onClick = onBackfillOcr) {
+                        Text("补齐未识别（重跑失败和未处理的图片）")
                     }
                 }
                 Text(

@@ -82,6 +82,7 @@ class OcrScanService : Service() {
             ACTION_RESUME -> resumeTask()
             ACTION_STOP -> stopTask()
             ACTION_RESTART -> restartTask()
+            ACTION_BACKFILL -> backfillTask()
             else -> startTask()
         }
         return START_NOT_STICKY
@@ -130,7 +131,7 @@ class OcrScanService : Service() {
         paused = false
         stopped = false
         acquireWakeLock()
-        job = scope.launch { runScan(resuming) }
+        job = scope.launch { runScan(resuming, onlyMissing = false) }
     }
 
     private fun resumeTask() {
@@ -145,7 +146,8 @@ class OcrScanService : Service() {
         paused = false
         stopped = false
         acquireWakeLock()
-        job = scope.launch { runScan(resuming = true) }
+        val onlyMissing = OcrScanBus.state.value.backfill
+        job = scope.launch { runScan(resuming = true, onlyMissing) }
     }
 
     private fun pauseTask() {
@@ -171,7 +173,26 @@ class OcrScanService : Service() {
         acquireWakeLock()
         job = scope.launch {
             previous?.join()
-            runScan(resuming = false)
+            runScan(resuming = false, onlyMissing = false)
+        }
+    }
+
+    /**
+     * Reads every picture that has no text index yet, which is how a pass that
+     * failed on most files gets retried after the cause is fixed. Pictures already
+     * indexed are filtered out up front, so the progress total is the work left.
+     */
+    private fun backfillTask() {
+        startForegroundWith()
+        val previous = job
+        previous?.cancel()
+        paused = false
+        stopped = false
+        OcrScanBus.reset()
+        acquireWakeLock()
+        job = scope.launch {
+            previous?.join()
+            runScan(resuming = false, onlyMissing = true)
         }
     }
 
@@ -187,9 +208,9 @@ class OcrScanService : Service() {
 
     // ---- the pass itself ----
 
-    private suspend fun runScan(resuming: Boolean) {
+    private suspend fun runScan(resuming: Boolean, onlyMissing: Boolean) {
         try {
-            runScanBody(resuming)
+            runScanBody(resuming, onlyMissing)
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (_: Throwable) {
@@ -201,7 +222,7 @@ class OcrScanService : Service() {
         }
     }
 
-    private suspend fun runScanBody(resuming: Boolean) {
+    private suspend fun runScanBody(resuming: Boolean, onlyMissing: Boolean) {
         val settings = AppSettings.of(application)
         val sources = (
             OcrScanBus.sources()
@@ -211,8 +232,10 @@ class OcrScanService : Service() {
         // Enter the running state before walking the trees. Enumeration is root work
         // that can take a minute, and without this the notification would offer no
         // way to pause or stop until the first picture was read.
-        val resumingRun = resuming && OcrScanBus.state.value.total > 0
-        if (resumingRun) OcrScanBus.resume() else OcrScanBus.begin(0, sources)
+        // A backfill list is rebuilt from the index each time, so its cursor would
+        // point into a different list after a pause; always start it from zero.
+        val resumingRun = resuming && !onlyMissing && OcrScanBus.state.value.total > 0
+        if (resumingRun) OcrScanBus.resume() else OcrScanBus.begin(0, sources, onlyMissing)
         notifyProgress(force = true, scanning = true)
 
         val repository = MediaRepository(application) { settings.persistScanIndex }
@@ -227,6 +250,12 @@ class OcrScanService : Service() {
         }
         awaitResume()
         if (stopped) return
+
+        if (onlyMissing) {
+            val indexed = runCatching { index.ids() }.getOrDefault(emptySet())
+            all.retainAll { it.id !in indexed }
+            notifyProgress(force = true, scanning = true)
+        }
 
         // Newest first: search becomes useful immediately instead of after the whole
         // backlog, which is the difference between a feature and a chore.
@@ -435,11 +464,16 @@ class OcrScanService : Service() {
         val progress = OcrScanBus.state.value
         val elapsed = formatDuration(progress.elapsedMillis())
         val text = when {
+            scanning && progress.backfill -> "正在查找未识别的图片…"
             scanning -> "正在读取图片索引…"
             progress.status == OcrScanStatus.PAUSED ->
-                "已暂停 · ${progress.done} / ${progress.total} · 用时 $elapsed"
+                (if (progress.backfill) "补齐已暂停" else "已暂停") +
+                    " · ${progress.done} / ${progress.total} · 用时 $elapsed"
             progress.status == OcrScanStatus.DONE ->
-                "识别完成 · ${progress.done} 张 · 用时 $elapsed"
+                (if (progress.backfill) "补齐完成" else "识别完成") +
+                    " · ${progress.done} 张 · 用时 $elapsed"
+            progress.backfill ->
+                "补齐中 ${progress.done} / ${progress.total} · 用时 $elapsed"
             else ->
                 "已处理 ${progress.done} / ${progress.total} · 用时 $elapsed"
         }
@@ -505,6 +539,7 @@ class OcrScanService : Service() {
         private const val ACTION_RESUME = "com.geno1024.ai.qqfm.ocr.RESUME"
         private const val ACTION_STOP = "com.geno1024.ai.qqfm.ocr.STOP"
         private const val ACTION_RESTART = "com.geno1024.ai.qqfm.ocr.RESTART"
+        private const val ACTION_BACKFILL = "com.geno1024.ai.qqfm.ocr.BACKFILL"
         private const val TAG = "OcrScan"
 
         /** Starts, or resumes a paused pass, from wherever the cursor is. */
@@ -520,6 +555,11 @@ class OcrScanService : Service() {
         /** Discards the cursor and starts a new pass from the newest picture. */
         fun restart(context: Context) {
             startForegroundService(context, ACTION_RESTART)
+        }
+
+        /** Reads only pictures that have no OCR text yet, including earlier failures. */
+        fun backfill(context: Context) {
+            startForegroundService(context, ACTION_BACKFILL)
         }
 
         fun pause(context: Context) {

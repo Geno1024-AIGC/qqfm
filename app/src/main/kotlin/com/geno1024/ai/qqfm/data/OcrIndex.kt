@@ -46,6 +46,15 @@ class OcrIndex(context: Context) {
         return found
     }
 
+    /** Every indexed id, for filtering out what a backfill still has to read. */
+    fun ids(): Set<String> {
+        val found = HashSet<String>()
+        helper.readableDatabase.rawQuery("SELECT id FROM ocr", null).use { cursor ->
+            while (cursor.moveToNext()) found.add(cursor.getString(0))
+        }
+        return found
+    }
+
     fun count(): Int =
         helper.readableDatabase.rawQuery("SELECT COUNT(*) FROM ocr", null).use { cursor ->
             if (cursor.moveToFirst()) cursor.getInt(0) else 0
