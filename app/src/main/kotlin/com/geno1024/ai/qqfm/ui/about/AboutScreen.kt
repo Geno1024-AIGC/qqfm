@@ -80,6 +80,7 @@ fun AboutScreen(
     onStartOcr: () -> Unit,
     onPauseOcr: () -> Unit,
     onStopOcr: () -> Unit,
+    onRestartOcr: () -> Unit,
 ) {
     val context = LocalContext.current
     val notificationPermission = rememberLauncherForActivityResult(
@@ -332,6 +333,7 @@ fun AboutScreen(
                         }
                         OcrScanStatus.PAUSED -> {
                             Button(onClick = { startScan() }) { Text("继续") }
+                            TextButton(onClick = onRestartOcr) { Text("重新开始") }
                             TextButton(onClick = onStopOcr) { Text("停止") }
                         }
                         OcrScanStatus.IDLE, OcrScanStatus.DONE -> {

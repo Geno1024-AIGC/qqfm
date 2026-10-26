@@ -283,6 +283,9 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     fun stopOcrScan() = OcrScanService.stop(getApplication())
 
+    /** Discards the saved cursor, for retrying a pass that mostly failed. */
+    fun restartOcrScan() = OcrScanService.restart(getApplication())
+
     /** The service writes to the same database; refresh the count as it progresses. */
     fun refreshOcrCount() {
         viewModelScope.launch {

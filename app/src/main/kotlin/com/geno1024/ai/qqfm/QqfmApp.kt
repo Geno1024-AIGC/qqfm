@@ -84,6 +84,7 @@ fun QqfmApp(viewModel: GalleryViewModel = viewModel()) {
                 onStartOcr = viewModel::startOcrScan,
                 onPauseOcr = viewModel::pauseOcrScan,
                 onStopOcr = viewModel::stopOcrScan,
+                onRestartOcr = viewModel::restartOcrScan,
             )
             choosingSources -> SourcePickerScreen(
                 initial = if (showSources) state.sources else viewModel.rememberedSources(),

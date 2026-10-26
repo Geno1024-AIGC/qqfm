@@ -13,6 +13,7 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.os.SystemClock
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.geno1024.ai.qqfm.MainActivity
@@ -32,7 +33,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import java.io.File
 import java.util.Locale
@@ -62,6 +65,7 @@ class OcrScanService : Service() {
 
     private var lastNotifyAt = 0L
     private var wakeLock: PowerManager.WakeLock? = null
+    private var failureLogs = 0
 
     override fun onCreate() {
         super.onCreate()
@@ -77,6 +81,7 @@ class OcrScanService : Service() {
             ACTION_PAUSE -> pauseTask()
             ACTION_RESUME -> resumeTask()
             ACTION_STOP -> stopTask()
+            ACTION_RESTART -> restartTask()
             else -> startTask()
         }
         return START_NOT_STICKY
@@ -148,6 +153,26 @@ class OcrScanService : Service() {
         OcrScanBus.pause()
         releaseWakeLock()
         notifyProgress(force = true)
+    }
+
+    /**
+     * Throws the saved cursor away and starts over.
+     *
+     * The old job is joined first: both would otherwise share the same batch
+     * directory, and one would delete the copies the other was still decoding.
+     */
+    private fun restartTask() {
+        startForegroundWith()
+        val previous = job
+        previous?.cancel()
+        paused = false
+        stopped = false
+        OcrScanBus.reset()
+        acquireWakeLock()
+        job = scope.launch {
+            previous?.join()
+            runScan(resuming = false)
+        }
     }
 
     private fun stopTask() {
@@ -223,6 +248,7 @@ class OcrScanService : Service() {
 
         val batchDir = File(cacheDir, "ocr-batch").apply { mkdirs() }
         while (cursor < total) {
+            currentCoroutineContext().ensureActive()
             if (stopped) break
             awaitResume()
             if (stopped) break
@@ -233,6 +259,7 @@ class OcrScanService : Service() {
 
             var advanced = 0
             for ((offset, item) in batch.withIndex()) {
+                currentCoroutineContext().ensureActive()
                 if (stopped) break
                 awaitResume()
                 if (stopped) break
@@ -240,12 +267,18 @@ class OcrScanService : Service() {
                 if (!runCatching { index.contains(item.id) }.getOrDefault(false)) {
                     val bitmap = decode(local[offset])
                     if (bitmap != null) {
-                        val text = runCatching { engine().recognize(bitmap) }.getOrNull()
+                        val attempt = runCatching { engine().recognize(bitmap) }
+                        val text = attempt.getOrNull()
+                        if (text == null) logFailure("recognize", item, attempt.exceptionOrNull())
                         val stored = text != null && runCatching { index.put(item.id, text) }.isSuccess
-                        if (!stored) failures++
+                        if (!stored) {
+                            failures++
+                            if (text != null) logFailure("store", item, null)
+                        }
                         bitmap.recycle()
                     } else {
                         failures++
+                        logFailure("decode", item, null)
                     }
                 }
                 done++
@@ -292,17 +325,38 @@ class OcrScanService : Service() {
     private fun copyBatch(items: List<MediaItem>, dir: File): List<File> {
         dir.deleteRecursively()
         dir.mkdirs()
+        // Create the destinations as the app first. `cp` truncates an existing file
+        // instead of replacing it, so the copies stay owned by the app; the explicit
+        // chmod covers the implementations that unlink and recreate. Without this the
+        // files are root-owned with QQ's 0600 mode and BitmapFactory sees nothing,
+        // which is what made almost every picture count as a read failure.
+        val targets = items.indices.map { index ->
+            File(dir, index.toString()).apply { runCatching { createNewFile() } }
+        }
         val command = buildString {
             for (i in items.indices) {
-                append("cp -f -- ")
+                val target = targets[i].absolutePath
+                // `cat > existing` truncates in place. `cp -f` is allowed to unlink
+                // and recreate on some implementations, which would hand the file
+                // back to root along with its SELinux label.
+                append("cat -- ")
                 append(RootShell.shellQuote(items[i].path))
-                append(' ')
-                append(RootShell.shellQuote(File(dir, i.toString()).absolutePath))
+                append(" > ")
+                append(RootShell.shellQuote(target))
+                append(" 2>/dev/null && chmod 0644 ")
+                append(RootShell.shellQuote(target))
                 append(" 2>/dev/null; ")
             }
         }
         runCatching { RootShell.exec(command) }
-        return items.indices.map { File(dir, it.toString()) }
+        return targets
+    }
+
+    /** The first few failures are worth a log line; a million of them are not. */
+    private fun logFailure(kind: String, item: MediaItem, error: Throwable?) {
+        if (failureLogs >= 8) return
+        failureLogs++
+        Log.w(TAG, "OCR $kind failed: ${item.path}", error)
     }
 
     private fun decode(file: File): Bitmap? = runCatching {
@@ -450,6 +504,8 @@ class OcrScanService : Service() {
         private const val ACTION_PAUSE = "com.geno1024.ai.qqfm.ocr.PAUSE"
         private const val ACTION_RESUME = "com.geno1024.ai.qqfm.ocr.RESUME"
         private const val ACTION_STOP = "com.geno1024.ai.qqfm.ocr.STOP"
+        private const val ACTION_RESTART = "com.geno1024.ai.qqfm.ocr.RESTART"
+        private const val TAG = "OcrScan"
 
         /** Starts, or resumes a paused pass, from wherever the cursor is. */
         fun start(context: Context) {
@@ -459,6 +515,11 @@ class OcrScanService : Service() {
                 ACTION_START
             }
             startForegroundService(context, action)
+        }
+
+        /** Discards the cursor and starts a new pass from the newest picture. */
+        fun restart(context: Context) {
+            startForegroundService(context, ACTION_RESTART)
         }
 
         fun pause(context: Context) {
