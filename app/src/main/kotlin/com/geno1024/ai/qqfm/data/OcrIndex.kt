@@ -51,6 +51,23 @@ class OcrIndex(context: Context) {
             if (cursor.moveToFirst()) cursor.getInt(0) else 0
         }
 
+    /** Drops the text of pictures that no longer exist, so search cannot find them. */
+    fun remove(ids: Collection<String>) {
+        if (ids.isEmpty()) return
+        val db = helper.writableDatabase
+        db.beginTransaction()
+        try {
+            // A large multi-select would otherwise overflow SQLite's bind limit.
+            ids.chunked(500).forEach { chunk ->
+                val placeholders = chunk.joinToString(",") { "?" }
+                db.execSQL("DELETE FROM ocr WHERE id IN ($placeholders)", chunk.toTypedArray())
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
     fun clear() {
         helper.writableDatabase.execSQL("DELETE FROM ocr")
     }

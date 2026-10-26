@@ -512,7 +512,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             val result = withContext(Dispatchers.IO) { repository.delete(selected) }
             recordCleanup(result)
             val removed = selected.mapTo(HashSet()) { it.id }
-            withContext(Dispatchers.IO) { forgetInIndex(selected, removed) }
+            withContext(Dispatchers.IO) { forgetRemoved(selected, removed) }
             publishItems(
                 if (result.errorMessage != null) {
                     result.errorMessage
@@ -536,7 +536,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             _state.update { it.copy(busy = true) }
             val result = withContext(Dispatchers.IO) { repository.delete(listOf(item)) }
             recordCleanup(result)
-            withContext(Dispatchers.IO) { forgetInIndex(listOf(item), setOf(item.id)) }
+            withContext(Dispatchers.IO) { forgetRemoved(listOf(item), setOf(item.id)) }
             publishItems(
                 if (result.errorMessage != null) {
                     result.errorMessage
@@ -621,6 +621,19 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private suspend fun forgetInIndex(items: List<MediaItem>, removedIds: Set<String>) {
         items.groupBy { it.source }.forEach { (source, entries) ->
             repository.forgetInCache(source, entries.mapTo(HashSet()) { it.id })
+        }
+    }
+
+    /** Drops both the scan cache and the OCR text of files that are now gone. */
+    private suspend fun forgetRemoved(items: List<MediaItem>, removedIds: Set<String>) {
+        forgetInIndex(items, removedIds)
+        ocrIndex.remove(removedIds)
+        val indexed = ocrIndex.count()
+        _state.update {
+            it.copy(
+                ocrIndexed = indexed,
+                ocrMatches = it.ocrMatches?.minus(removedIds),
+            )
         }
     }
 
