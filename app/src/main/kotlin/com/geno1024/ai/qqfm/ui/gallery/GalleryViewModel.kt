@@ -28,6 +28,14 @@ import java.time.LocalDate
 import java.time.ZoneId
 import java.util.Locale
 
+/**
+ * Search text that asks for pictures whose OCR came back empty.
+ *
+ * A separate token rather than a toggle so it travels through the same debounce and
+ * filter path as ordinary text, and survives the screen being recreated.
+ */
+const val NO_TEXT_QUERY = "#无文字"
+
 enum class SortMode {
     TIME_DESC,
     TIME_ASC,
@@ -186,7 +194,11 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             val trimmed = query.trim()
             val matches = withContext(Dispatchers.IO) {
-                if (trimmed.isEmpty()) null else ocrIndex.search(trimmed)
+                when {
+                    trimmed.isEmpty() -> null
+                    trimmed == NO_TEXT_QUERY -> ocrIndex.emptyIds()
+                    else -> ocrIndex.search(trimmed)
+                }
             }
             // Typing fires one query per keystroke; a slow early one must not overwrite
             // the results of a later, shorter query.

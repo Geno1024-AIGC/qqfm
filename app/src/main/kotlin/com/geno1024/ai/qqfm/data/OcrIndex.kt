@@ -55,6 +55,16 @@ class OcrIndex(context: Context) {
         return found
     }
 
+    /** Pictures that were read successfully but contained no text at all. */
+    fun emptyIds(): Set<String> {
+        val found = HashSet<String>()
+        helper.readableDatabase.rawQuery(
+            "SELECT id FROM ocr WHERE TRIM(text) = ''",
+            null,
+        ).use { cursor -> while (cursor.moveToNext()) found.add(cursor.getString(0)) }
+        return found
+    }
+
     fun count(): Int =
         helper.readableDatabase.rawQuery("SELECT COUNT(*) FROM ocr", null).use { cursor ->
             if (cursor.moveToFirst()) cursor.getInt(0) else 0

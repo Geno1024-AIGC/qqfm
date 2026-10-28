@@ -133,8 +133,10 @@ fun GalleryScreen(
                 }
                 state.items.isEmpty() -> Centered {
                     Text(
-                        if (state.searchQuery.isNotBlank()) {
-                            "没有匹配的文字\n只搜索已经打开过的图片"
+                        if (state.searchQuery == NO_TEXT_QUERY) {
+                            "没有识别为无文字的图片\n只搜索已经识别过的图片"
+                        } else if (state.searchQuery.isNotBlank()) {
+                            "没有匹配的文字\n只搜索已经识别过的图片"
                         } else {
                             "没有找到图片"
                         },
@@ -207,7 +209,15 @@ private fun GalleryTopBar(
         },
         actions = {
             when {
-                searching -> Unit
+                searching -> TextButton(
+                    onClick = {
+                        viewModel.setSearchQuery(
+                            if (state.searchQuery == NO_TEXT_QUERY) "" else NO_TEXT_QUERY,
+                        )
+                    },
+                ) {
+                    Text(if (state.searchQuery == NO_TEXT_QUERY) "取消无文字" else "无文字")
+                }
                 state.selectionActive -> {
                     IconButton(onClick = viewModel::selectAll) {
                         Icon(Icons.Filled.Done, contentDescription = "全选")
