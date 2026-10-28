@@ -135,6 +135,8 @@ fun GalleryScreen(
                     Text(
                         if (state.searchQuery == NO_TEXT_QUERY) {
                             "没有识别为无文字的图片\n只搜索已经识别过的图片"
+                        } else if (state.searchQuery == FAILED_QUERY) {
+                            "没有识别失败的图片\n只统计已经尝试识别过的图片"
                         } else if (state.searchQuery.isNotBlank()) {
                             "没有匹配的文字\n只搜索已经识别过的图片"
                         } else {
@@ -209,14 +211,25 @@ private fun GalleryTopBar(
         },
         actions = {
             when {
-                searching -> TextButton(
-                    onClick = {
-                        viewModel.setSearchQuery(
-                            if (state.searchQuery == NO_TEXT_QUERY) "" else NO_TEXT_QUERY,
-                        )
-                    },
-                ) {
-                    Text(if (state.searchQuery == NO_TEXT_QUERY) "取消无文字" else "无文字")
+                searching -> Row {
+                    TextButton(
+                        onClick = {
+                            viewModel.setSearchQuery(
+                                if (state.searchQuery == NO_TEXT_QUERY) "" else NO_TEXT_QUERY,
+                            )
+                        },
+                    ) {
+                        Text(if (state.searchQuery == NO_TEXT_QUERY) "取消无文字" else "无文字")
+                    }
+                    TextButton(
+                        onClick = {
+                            viewModel.setSearchQuery(
+                                if (state.searchQuery == FAILED_QUERY) "" else FAILED_QUERY,
+                            )
+                        },
+                    ) {
+                        Text(if (state.searchQuery == FAILED_QUERY) "取消失败" else "失败")
+                    }
                 }
                 state.selectionActive -> {
                     IconButton(onClick = viewModel::selectAll) {

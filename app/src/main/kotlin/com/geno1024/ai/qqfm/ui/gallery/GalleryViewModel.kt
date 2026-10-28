@@ -36,6 +36,9 @@ import java.util.Locale
  */
 const val NO_TEXT_QUERY = "#无文字"
 
+/** Search text that asks for pictures whose OCR could not be completed. */
+const val FAILED_QUERY = "#识别失败"
+
 enum class SortMode {
     TIME_DESC,
     TIME_ASC,
@@ -197,6 +200,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 when {
                     trimmed.isEmpty() -> null
                     trimmed == NO_TEXT_QUERY -> ocrIndex.emptyIds()
+                    trimmed == FAILED_QUERY -> ocrIndex.failedIds()
                     else -> ocrIndex.search(trimmed)
                 }
             }
@@ -251,8 +255,16 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             try {
                 if (withContext(Dispatchers.IO) { ocrIndex.contains(item.id) }) return@launch
-                val bitmap = imageStore.ocrBitmap(item) ?: return@launch
-                val text = runCatching { engine().recognize(bitmap) }.getOrNull() ?: return@launch
+                val bitmap = imageStore.ocrBitmap(item)
+                if (bitmap == null) {
+                    withContext(Dispatchers.IO) { ocrIndex.markFailed(item.id) }
+                    return@launch
+                }
+                val text = runCatching { engine().recognize(bitmap) }.getOrNull()
+                if (text == null) {
+                    withContext(Dispatchers.IO) { ocrIndex.markFailed(item.id) }
+                    return@launch
+                }
                 withContext(Dispatchers.IO) { ocrIndex.put(item.id, text) }
                 val total = withContext(Dispatchers.IO) { ocrIndex.count() }
                 _state.update { it.copy(ocrIndexed = total) }
@@ -272,6 +284,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             }
             val bitmap = imageStore.ocrBitmap(item)
             if (bitmap == null) {
+                withContext(Dispatchers.IO) { ocrIndex.markFailed(item.id) }
                 onReady(null)
                 return@launch
             }
@@ -280,6 +293,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 withContext(Dispatchers.IO) { ocrIndex.put(item.id, text) }
                 val total = withContext(Dispatchers.IO) { ocrIndex.count() }
                 _state.update { it.copy(ocrIndexed = total) }
+            } else {
+                withContext(Dispatchers.IO) { ocrIndex.markFailed(item.id) }
             }
             onReady(text)
         }

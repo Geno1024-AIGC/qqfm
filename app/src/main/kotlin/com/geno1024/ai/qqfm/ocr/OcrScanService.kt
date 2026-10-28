@@ -305,11 +305,13 @@ class OcrScanService : Service() {
                         val stored = text != null && runCatching { index.put(item.id, text) }.isSuccess
                         if (!stored) {
                             failures++
+                            runCatching { index.markFailed(item.id) }
                             if (text != null) logFailure("store", item, null)
                         }
                         bitmap.recycle()
                     } else {
                         failures++
+                        runCatching { index.markFailed(item.id) }
                         logFailure("decode", item, null)
                     }
                 }

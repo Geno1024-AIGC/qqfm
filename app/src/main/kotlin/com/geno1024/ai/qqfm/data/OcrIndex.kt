@@ -29,10 +29,38 @@ class OcrIndex(context: Context) {
         ).use { cursor -> cursor.moveToFirst() }
 
     fun put(id: String, text: String) {
+        val db = helper.writableDatabase
+        db.beginTransaction()
+        try {
+            db.execSQL(
+                "INSERT OR REPLACE INTO ocr(id, text, updated) VALUES(?, ?, ?)",
+                arrayOf<Any>(id, text, System.currentTimeMillis()),
+            )
+            db.execSQL("DELETE FROM ocr_failed WHERE id = ?", arrayOf<Any>(id))
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    /** Remembers a picture that could not be read, for the failure filter. */
+    fun markFailed(id: String) {
+        // A picture that already has text is not a failure, even if a concurrent
+        // second attempt for it went wrong; the index row is the stronger fact.
         helper.writableDatabase.execSQL(
-            "INSERT OR REPLACE INTO ocr(id, text, updated) VALUES(?, ?, ?)",
-            arrayOf<Any>(id, text, System.currentTimeMillis()),
+            "INSERT OR REPLACE INTO ocr_failed(id, updated) " +
+                "SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM ocr WHERE id = ?)",
+            arrayOf<Any>(id, System.currentTimeMillis(), id),
         )
+    }
+
+    /** Ids that were attempted but could not be decoded or recognized. */
+    fun failedIds(): Set<String> {
+        val found = HashSet<String>()
+        helper.readableDatabase.rawQuery("SELECT id FROM ocr_failed", null).use { cursor ->
+            while (cursor.moveToNext()) found.add(cursor.getString(0))
+        }
+        return found
     }
 
     /** Ids whose recognized text contains [query], interpreted literally. */
@@ -80,6 +108,7 @@ class OcrIndex(context: Context) {
             ids.chunked(500).forEach { chunk ->
                 val placeholders = chunk.joinToString(",") { "?" }
                 db.execSQL("DELETE FROM ocr WHERE id IN ($placeholders)", chunk.toTypedArray())
+                db.execSQL("DELETE FROM ocr_failed WHERE id IN ($placeholders)", chunk.toTypedArray())
             }
             db.setTransactionSuccessful()
         } finally {
@@ -88,7 +117,15 @@ class OcrIndex(context: Context) {
     }
 
     fun clear() {
-        helper.writableDatabase.execSQL("DELETE FROM ocr")
+        val db = helper.writableDatabase
+        db.beginTransaction()
+        try {
+            db.execSQL("DELETE FROM ocr")
+            db.execSQL("DELETE FROM ocr_failed")
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
     }
 
     /** `LIKE` treats these as wildcards, so a search for them has to escape them. */
@@ -104,7 +141,7 @@ class OcrIndex(context: Context) {
         }
     }
 
-    private class Helper(context: Context) : SQLiteOpenHelper(context, "ocr.db", null, 1) {
+    private class Helper(context: Context) : SQLiteOpenHelper(context, "ocr.db", null, 2) {
         init {
             // The scanner writes while the gallery can be searching; WAL lets those
             // readers and the writer coexist instead of one waiting on the other.
@@ -118,11 +155,22 @@ class OcrIndex(context: Context) {
                     "text TEXT NOT NULL, " +
                     "updated INTEGER NOT NULL)",
             )
+            db.execSQL(
+                "CREATE TABLE ocr_failed(" +
+                    "id TEXT PRIMARY KEY, " +
+                    "updated INTEGER NOT NULL)",
+            )
         }
 
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-            db.execSQL("DROP TABLE IF EXISTS ocr")
-            onCreate(db)
+            // Never drop the index on upgrade: it is the expensive part of the app.
+            if (oldVersion < 2) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS ocr_failed(" +
+                        "id TEXT PRIMARY KEY, " +
+                        "updated INTEGER NOT NULL)",
+                )
+            }
         }
     }
 }
