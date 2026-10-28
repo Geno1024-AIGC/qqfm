@@ -175,6 +175,7 @@ object OcrScanBus {
     fun reset() {
         cursorValue = 0
         sincePersist = 0
+        sourcesValue = emptySet()
         _state.value = OcrScanProgress()
         persistLocked()
     }

@@ -224,17 +224,20 @@ class OcrScanService : Service() {
 
     private suspend fun runScanBody(resuming: Boolean, onlyMissing: Boolean) {
         val settings = AppSettings.of(application)
+        // A paused pass continues on the trees it started with. Anything new uses the
+        // gallery's current selection, so switching directories and starting a fresh
+        // pass actually reads the directory now on screen.
+        // A backfill list is rebuilt from the index each time, so its cursor would
+        // point into a different list after a pause; always start it from zero.
+        val resumingRun = resuming && !onlyMissing && OcrScanBus.state.value.total > 0
         val sources = (
-            OcrScanBus.sources()
+            (if (resumingRun) OcrScanBus.sources() else emptySet())
                 .ifEmpty { settings.selectedSources }
                 .ifEmpty { MediaSource.entries.toSet() }
             )
         // Enter the running state before walking the trees. Enumeration is root work
         // that can take a minute, and without this the notification would offer no
         // way to pause or stop until the first picture was read.
-        // A backfill list is rebuilt from the index each time, so its cursor would
-        // point into a different list after a pause; always start it from zero.
-        val resumingRun = resuming && !onlyMissing && OcrScanBus.state.value.total > 0
         if (resumingRun) OcrScanBus.resume() else OcrScanBus.begin(0, sources, onlyMissing)
         notifyProgress(force = true, scanning = true)
 
