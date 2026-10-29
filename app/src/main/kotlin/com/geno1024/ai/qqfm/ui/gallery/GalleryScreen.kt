@@ -38,6 +38,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.outlined.Lock
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -79,6 +80,7 @@ import androidx.compose.ui.unit.dp
 import com.geno1024.ai.qqfm.data.ImageStore
 import com.geno1024.ai.qqfm.data.MediaItem
 import com.geno1024.ai.qqfm.ui.formatBytes
+import com.geno1024.ai.qqfm.ui.formatGrouped
 import com.geno1024.ai.qqfm.ui.formatTimestamp
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -168,6 +170,7 @@ private fun GalleryTopBar(
     onSearchingChange: (Boolean) -> Unit,
 ) {
     val searchFocus = remember { FocusRequester() }
+    var showSizeDialog by remember { mutableStateOf(false) }
     LaunchedEffect(searching) {
         if (searching) searchFocus.requestFocus()
     }
@@ -188,7 +191,10 @@ private fun GalleryTopBar(
                     ),
                 )
                 state.selectionActive -> Text("已选 ${state.selection.size} 项")
-                else -> Text("${state.items.size} 张")
+                else -> Text(
+                    text = "${state.items.size} 张",
+                    modifier = Modifier.clickable { showSizeDialog = true },
+                )
             }
         },
         navigationIcon = {
@@ -254,6 +260,22 @@ private fun GalleryTopBar(
             }
         },
     )
+
+    if (showSizeDialog) {
+        AlertDialog(
+            onDismissRequest = { showSizeDialog = false },
+            title = { Text("${state.items.size} 张图片") },
+            text = {
+                Text(
+                    "总大小：${formatGrouped(state.totalBytes)} 字节\n" +
+                        "（${formatBytes(state.totalBytes)}）",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { showSizeDialog = false }) { Text("好") }
+            },
+        )
+    }
 }
 
 @Composable

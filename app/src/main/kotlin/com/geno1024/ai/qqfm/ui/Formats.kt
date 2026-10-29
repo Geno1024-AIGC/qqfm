@@ -5,6 +5,9 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
+/** Raw count with thousands separators, e.g. `12,345,678`. */
+fun formatGrouped(value: Long): String = String.format(Locale.ROOT, "%,d", value)
+
 /** Renders sizes in binary units: B, KiB, MiB, GiB, TiB. */
 fun formatBytes(bytes: Long): String {
     if (bytes < 1024L) return "$bytes B"
