@@ -6,6 +6,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -44,6 +46,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -110,14 +113,22 @@ fun GalleryScreen(
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
-            GalleryTopBar(
-                state = state,
-                viewModel = viewModel,
-                onOpenAbout = onOpenAbout,
-                onOpenSources = onOpenSources,
-                searching = searching,
-                onSearchingChange = { searching = it },
-            )
+            Column {
+                GalleryTopBar(
+                    state = state,
+                    viewModel = viewModel,
+                    onOpenAbout = onOpenAbout,
+                    onOpenSources = onOpenSources,
+                    searching = searching,
+                    onSearchingChange = { searching = it },
+                )
+                if (searching) {
+                    SearchFilters(
+                        query = state.searchQuery,
+                        onQuery = viewModel::setSearchQuery,
+                    )
+                }
+            }
         },
         bottomBar = {
             if (state.selectionActive) SelectionBar(state, viewModel)
@@ -135,7 +146,9 @@ fun GalleryScreen(
                 }
                 state.items.isEmpty() -> Centered {
                     Text(
-                        if (state.searchQuery == NO_TEXT_QUERY) {
+                        if (state.searchQuery == HAS_TEXT_QUERY) {
+                            "没有识别出文字的图片\n只搜索已经识别过的图片"
+                        } else if (state.searchQuery == NO_TEXT_QUERY) {
                             "没有识别为无文字的图片\n只搜索已经识别过的图片"
                         } else if (state.searchQuery == FAILED_QUERY) {
                             "没有识别失败的图片\n只统计已经尝试识别过的图片"
@@ -217,26 +230,7 @@ private fun GalleryTopBar(
         },
         actions = {
             when {
-                searching -> Row {
-                    TextButton(
-                        onClick = {
-                            viewModel.setSearchQuery(
-                                if (state.searchQuery == NO_TEXT_QUERY) "" else NO_TEXT_QUERY,
-                            )
-                        },
-                    ) {
-                        Text(if (state.searchQuery == NO_TEXT_QUERY) "取消无文字" else "无文字")
-                    }
-                    TextButton(
-                        onClick = {
-                            viewModel.setSearchQuery(
-                                if (state.searchQuery == FAILED_QUERY) "" else FAILED_QUERY,
-                            )
-                        },
-                    ) {
-                        Text(if (state.searchQuery == FAILED_QUERY) "取消失败" else "失败")
-                    }
-                }
+                searching -> Unit
                 state.selectionActive -> {
                     IconButton(onClick = viewModel::selectAll) {
                         Icon(Icons.Filled.Done, contentDescription = "全选")
@@ -274,6 +268,44 @@ private fun GalleryTopBar(
             confirmButton = {
                 TextButton(onClick = { showSizeDialog = false }) { Text("好") }
             },
+        )
+    }
+}
+
+@Composable
+private fun SearchFilters(query: String, onQuery: (String) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        FilterChip(
+            selected = query.isBlank(),
+            onClick = { onQuery("") },
+            label = { Text("全部") },
+        )
+        FilterChip(
+            selected = query == HAS_TEXT_QUERY,
+            onClick = {
+                onQuery(if (query == HAS_TEXT_QUERY) "" else HAS_TEXT_QUERY)
+            },
+            label = { Text("有文字") },
+        )
+        FilterChip(
+            selected = query == NO_TEXT_QUERY,
+            onClick = {
+                onQuery(if (query == NO_TEXT_QUERY) "" else NO_TEXT_QUERY)
+            },
+            label = { Text("无文字") },
+        )
+        FilterChip(
+            selected = query == FAILED_QUERY,
+            onClick = {
+                onQuery(if (query == FAILED_QUERY) "" else FAILED_QUERY)
+            },
+            label = { Text("失败") },
         )
     }
 }

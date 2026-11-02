@@ -34,6 +34,8 @@ import java.util.Locale
  * A separate token rather than a toggle so it travels through the same debounce and
  * filter path as ordinary text, and survives the screen being recreated.
  */
+const val HAS_TEXT_QUERY = "#有文字"
+
 const val NO_TEXT_QUERY = "#无文字"
 
 /** Search text that asks for pictures whose OCR could not be completed. */
@@ -199,6 +201,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             val matches = withContext(Dispatchers.IO) {
                 when {
                     trimmed.isEmpty() -> null
+                    trimmed == HAS_TEXT_QUERY -> ocrIndex.textIds()
                     trimmed == NO_TEXT_QUERY -> ocrIndex.emptyIds()
                     trimmed == FAILED_QUERY -> ocrIndex.failedIds()
                     else -> ocrIndex.search(trimmed)
