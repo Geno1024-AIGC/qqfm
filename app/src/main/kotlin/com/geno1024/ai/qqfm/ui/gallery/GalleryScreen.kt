@@ -497,6 +497,21 @@ private fun GridCell(
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),
             )
+            // Videos may now carry a real first frame; the badge keeps them apart
+            // from pictures at a glance.
+            if (item.source.isVideo) {
+                Icon(
+                    Icons.Filled.PlayArrow,
+                    contentDescription = "视频",
+                    tint = Color.White,
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .clip(CircleShape)
+                        .background(Color.Black.copy(alpha = 0.45f))
+                        .padding(3.dp)
+                        .size(22.dp),
+                )
+            }
         } else if (settled && item.source.isVideo) {
             Icon(
                 Icons.Filled.PlayArrow,

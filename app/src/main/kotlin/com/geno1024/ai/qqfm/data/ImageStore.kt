@@ -6,6 +6,7 @@ import android.graphics.BitmapFactory
 import android.graphics.ImageDecoder
 import android.graphics.drawable.Animatable
 import android.graphics.drawable.Drawable
+import android.media.MediaMetadataRetriever
 import android.os.Build
 import android.util.LruCache
 import androidx.annotation.RequiresApi
@@ -218,8 +219,15 @@ class ImageStore(private val context: Context) {
 
         return withContext(Dispatchers.IO) {
             semaphore.withPermit {
-                val bytes = readCandidates(item) ?: return@withPermit null
-                val bitmap = decodeSampled(bytes, targetPx) ?: return@withPermit null
+                val bytes = readCandidates(item)
+                // A video whose preview cannot be matched by name still earns a
+                // picture: its first frame is decoded from the local copy and
+                // cached like any other bitmap, so the cost is paid once per size.
+                val bitmap = when {
+                    bytes != null -> decodeSampled(bytes, targetPx)
+                    item.source.isVideo -> frameFromVideo(item, targetPx)
+                    else -> null
+                } ?: return@withPermit null
                 runCatching {
                     FileOutputStream(disk).use { out ->
                         bitmap.compress(Bitmap.CompressFormat.JPEG, 82, out)
@@ -232,11 +240,42 @@ class ImageStore(private val context: Context) {
     }
 
     /**
+     * The first frame of a video, decoded from the local copy.
+     *
+     * The thumbnail trees beside the videos are paired by name, and neither their
+     * presence nor their naming rule holds across QQ versions — on a device where
+     * the pairing misses, every video would otherwise stay a placeholder and the
+     * grid could not be used to pick anything by eye. The frame comes from the
+     * same copy playback reuses, and a sync keyframe (not a full decode) is enough.
+     */
+    private suspend fun frameFromVideo(item: MediaItem, targetPx: Int): Bitmap? {
+        val local = localVideo(item) ?: return null
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(local.absolutePath)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                retriever.getScaledFrameAtTime(
+                    0L,
+                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                    targetPx,
+                    targetPx,
+                )
+            } else {
+                retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            }?.let(::withinDrawableSize)
+        } catch (_: Exception) {
+            null
+        } finally {
+            runCatching { retriever.release() }
+        }
+    }
+
+    /**
      * Previews first, then the full picture, so a missing thumb still renders.
      *
      * A video's own bytes are deliberately not a candidate: feeding an MP4 to
-     * BitmapFactory cannot work and reading a 50 MB file to find that out is worse
-     * than showing the play placeholder.
+     * BitmapFactory cannot work. A video with no matched preview gets its first
+     * frame from the local copy instead; a picture with no thumb simply has none.
      */
     private fun readCandidates(item: MediaItem): ByteArray? {
         for (path in item.thumbnailCandidates) {
