@@ -49,8 +49,11 @@ enum class MediaSource(val id: String, val dir: String) {
 
     val isVideo: Boolean get() = this == VIDEO
 
-    /** Video files are found and deleted here, but never fed to the text model. */
-    val supportsOcr: Boolean get() = this != VIDEO && this != VIDEO_THUMB
+    /**
+     * A video's own bytes are not a picture, so they never go to the text model.
+     * Its thumbnail is a real frame though, and text on it is worth searching.
+     */
+    val supportsOcr: Boolean get() = this != VIDEO
 
     /** One source may live in more than one legacy directory name. */
     val scanDirs: List<String>
