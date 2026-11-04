@@ -6,8 +6,11 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.os.SystemClock
 import android.widget.ImageView
+import android.widget.MediaController
+import android.widget.VideoView
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculatePan
@@ -43,6 +46,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -76,6 +80,7 @@ import com.geno1024.ai.qqfm.ui.formatBytes
 import com.geno1024.ai.qqfm.ui.formatTimestamp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -275,6 +280,20 @@ fun ViewerScreen(
                     value = imageStore.viewer(item, 2048)
                     settled = true
                 }
+                // QQ's cache is root-only, so a video first has to be copied into
+                // app-private storage before any player can open it.
+                var videoFile by remember(item.id) { mutableStateOf<File?>(null) }
+                var videoPreparing by remember(item.id) { mutableStateOf(false) }
+                val startPlayback: () -> Unit = {
+                    if (!videoPreparing && videoFile == null) {
+                        videoPreparing = true
+                        scope.launch {
+                            val file = imageStore.localVideo(item)
+                            videoPreparing = false
+                            if (file == null) showNotice("无法读取视频文件") else videoFile = file
+                        }
+                    }
+                }
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -307,7 +326,16 @@ fun ViewerScreen(
                             translationX = offsetX
                             translationY = offsetY
                         }
-                    when (val image = loaded) {
+                    val readyVideo = videoFile
+                    if (item.source.isVideo && readyVideo != null) {
+                        VideoPlayer(
+                            file = readyVideo,
+                            onError = {
+                                videoFile = null
+                                showNotice("无法播放该视频")
+                            },
+                        )
+                    } else when (val image = loaded) {
                         is LoadedImage.Still -> Image(
                             bitmap = image.bitmap.asImageBitmap(),
                             contentDescription = null,
@@ -329,27 +357,51 @@ fun ViewerScreen(
                             modifier = zoomModifier,
                         )
                         null -> {
-                            if (settled && item.source.isVideo) {
-                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                    Icon(
-                                        Icons.Filled.PlayArrow,
-                                        contentDescription = "视频",
-                                        tint = Color.White.copy(alpha = 0.9f),
-                                        modifier = Modifier.size(72.dp),
-                                    )
-                                    Text(
-                                        text = "视频文件",
-                                        style = MaterialTheme.typography.titleMedium,
-                                        color = Color.White,
-                                    )
-                                    Text(
-                                        text = "部分版本没有可用缩略图，暂不支持预览",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = Color.White.copy(alpha = 0.7f),
-                                    )
-                                }
-                            } else {
+                            // A video draws its thumbnail when there is one; the
+                            // play control below is the affordance either way.
+                            if (!(settled && item.source.isVideo)) {
                                 CircularProgressIndicator(color = Color.White)
+                            }
+                        }
+                    }
+
+                    // A video is never shown as-is: behind this control there is
+                    // either its thumbnail or nothing, and a tap starts playback.
+                    if (item.source.isVideo && readyVideo == null && settled) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier
+                                .align(Alignment.Center)
+                                .clip(CircleShape)
+                                .background(Color.Black.copy(alpha = 0.45f))
+                                .clickable(enabled = !videoPreparing, onClick = startPlayback)
+                                .padding(horizontal = 28.dp, vertical = 18.dp),
+                        ) {
+                            if (videoPreparing) {
+                                CircularProgressIndicator(
+                                    color = Color.White,
+                                    modifier = Modifier.size(40.dp),
+                                    strokeWidth = 3.dp,
+                                )
+                                Text(
+                                    text = "正在准备视频…",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = Color.White,
+                                    modifier = Modifier.padding(top = 12.dp),
+                                )
+                            } else {
+                                Icon(
+                                    Icons.Filled.PlayArrow,
+                                    contentDescription = "播放",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(44.dp),
+                                )
+                                Text(
+                                    text = "点击播放",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = Color.White,
+                                    modifier = Modifier.padding(top = 4.dp),
+                                )
                             }
                         }
                     }
@@ -444,6 +496,49 @@ fun ViewerScreen(
 /** The item's path relative to the chat picture root, e.g. `chatimg/000/Cache_...`. */
 private fun relativePath(item: MediaItem): String =
     item.path.removePrefix(MediaPaths.TENCENT_ROOT).removePrefix("/")
+
+/**
+ * Plays one already-copied video with the platform's own player.
+ *
+ * `VideoView` rather than a media3 dependency: the file is local, the formats are
+ * the ones QQ records (mp4 mostly), and the built-in controller gives scrubbing,
+ * pause and volume for nothing. The path is set once per file — `update` runs on
+ * every recomposition and restarting a playing video would be a bug.
+ */
+@Composable
+private fun VideoPlayer(file: File, onError: () -> Unit) {
+    var player by remember { mutableStateOf<VideoView?>(null) }
+    DisposableEffect(file) {
+        onDispose {
+            player?.stopPlayback()
+            player = null
+        }
+    }
+    AndroidView(
+        factory = { context ->
+            VideoView(context).apply {
+                setKeepScreenOn(true)
+                val controller = MediaController(context)
+                controller.setAnchorView(this)
+                setMediaController(controller)
+                setOnPreparedListener { it.isLooping = false; start() }
+                setOnErrorListener { _, _, _ ->
+                    onError()
+                    true
+                }
+                player = this
+            }
+        },
+        update = { view ->
+            if (view.tag != file.absolutePath) {
+                view.tag = file.absolutePath
+                view.setVideoPath(file.absolutePath)
+                view.requestFocus()
+            }
+        },
+        modifier = Modifier.fillMaxSize(),
+    )
+}
 
 /**
  * Zoom, pan and double tap on one picture, while leaving page swipes alone.

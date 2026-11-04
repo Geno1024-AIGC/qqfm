@@ -69,6 +69,54 @@ class ImageStore(private val context: Context) {
         decodeFile(file, targetPx)
 
     /**
+     * A local copy of a video, ready for a player to open.
+     *
+     * QQ's cache is root-only and no player can read it, so the file is copied
+     * into app-private storage first — one `su` per copy, paid only when the user
+     * actually asks to play. A copy whose size still matches the file on screen is
+     * reused, and the directory is trimmed so browsing videos cannot fill the disk.
+     */
+    suspend fun localVideo(item: MediaItem): File? = withContext(Dispatchers.IO) {
+        val dir = File(context.cacheDir, "videos").apply { mkdirs() }
+        val target = File(dir, item.base.replace(Regex("[^A-Za-z0-9._-]"), "_"))
+        if (target.isFile && target.length() > 0L &&
+            (item.size <= 0L || target.length() == item.size)
+        ) {
+            return@withContext target
+        }
+        pruneVideoCache(dir, target)
+        // Created as the app first: `cat > existing` truncates in place and keeps
+        // the ownership, the same trick the OCR batch copy relies on.
+        runCatching { target.createNewFile() }
+        val command = "cat -- " + RootShell.shellQuote(item.path) +
+            " > " + RootShell.shellQuote(target.absolutePath) +
+            " 2>/dev/null && chmod 0644 " + RootShell.shellQuote(target.absolutePath) +
+            " 2>/dev/null"
+        runCatching { RootShell.exec(command) }
+        if (target.isFile && target.length() > 0L &&
+            (item.size <= 0L || target.length() == item.size)
+        ) {
+            target
+        } else {
+            runCatching { target.delete() }
+            null
+        }
+    }
+
+    /** Drops old copies once [dir] grows past [VIDEO_CACHE_BYTES]. */
+    private fun pruneVideoCache(dir: File, keep: File) {
+        val files = dir.listFiles() ?: return
+        var total = files.sumOf { it.length() }
+        if (total <= VIDEO_CACHE_BYTES) return
+        for (file in files.sortedBy { it.lastModified() }) {
+            if (total <= VIDEO_CACHE_BYTES) break
+            if (file == keep) continue
+            total -= file.length()
+            runCatching { file.delete() }
+        }
+    }
+
+    /**
      * Decodes an image for the viewer, keeping motion when there is any.
      *
      * A still goes through the shared bitmap path, which downsamples and caches. An
@@ -290,6 +338,9 @@ private const val MAX_ANIMATION_BYTES = 24L * 1024 * 1024
 
 /** How much raw animation is kept around, in bytes. */
 private const val RAW_CACHE_BYTES = 16L * 1024 * 1024
+
+/** How much copied video may sit in the cache before the oldest is dropped. */
+private const val VIDEO_CACHE_BYTES = 256L * 1024 * 1024
 
 /** How much a decode may exceed its target before it is halved again, in pixels². */
 private const val PIXEL_BUDGET_FACTOR = 2L
