@@ -234,7 +234,7 @@ class OcrScanService : Service() {
             (if (resumingRun) OcrScanBus.sources() else emptySet())
                 .ifEmpty { settings.selectedSources }
                 .ifEmpty { MediaSource.entries.toSet() }
-            )
+            ).filterTo(LinkedHashSet()) { it.supportsOcr }
         // Enter the running state before walking the trees. Enumeration is root work
         // that can take a minute, and without this the notification would offer no
         // way to pause or stop until the first picture was read.

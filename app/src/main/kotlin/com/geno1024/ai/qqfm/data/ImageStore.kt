@@ -76,7 +76,10 @@ class ImageStore(private val context: Context) {
      * single frame forever, so those are decoded fresh and left to animate in place.
      */
     suspend fun viewer(item: MediaItem, maxPx: Int): LoadedImage? {
-        if (item.size <= MAX_ANIMATION_BYTES && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        if (!item.source.isVideo &&
+            item.size <= MAX_ANIMATION_BYTES &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+        ) {
             val bytes = readViewerBytes(item)
             if (bytes != null && looksAnimated(bytes)) {
                 decodeAnimated(bytes, maxPx)?.let { return LoadedImage.Motion(it) }
@@ -90,7 +93,10 @@ class ImageStore(private val context: Context) {
         rawBytes.get(item.id)?.let { return it }
         return withContext(Dispatchers.IO) {
             semaphore.withPermit {
-                val bytes = readAll(item.path) ?: readAll(item.thumbnailPath)
+                // The full file first: this path is only for animations, and a
+                // flattened thumbnail would lose every frame but the first.
+                val bytes = readAll(item.path)
+                    ?: item.thumbnailCandidates.firstNotNullOfOrNull { path -> readAll(path) }
                 if (bytes != null) rawBytes.put(item.id, bytes)
                 bytes
             }
@@ -177,14 +183,15 @@ class ImageStore(private val context: Context) {
         }
     }
 
-    /** Thumbnail first, then the full file, so a missing thumb still renders. */
+    /**
+     * Previews first, then the full picture, so a missing thumb still renders.
+     *
+     * A video's own bytes are deliberately not a candidate: feeding an MP4 to
+     * BitmapFactory cannot work and reading a 50 MB file to find that out is worse
+     * than showing the play placeholder.
+     */
     private fun readCandidates(item: MediaItem): ByteArray? {
-        val candidates = listOf(
-            item.thumbnailPath,
-            MediaPaths.pathIn(MediaPaths.THUMB_DIR, "Cache_${item.base}"),
-            item.path,
-        )
-        for (path in candidates) {
+        for (path in item.thumbnailCandidates) {
             val bytes = readAll(path)
             if (bytes != null && bytes.isNotEmpty()) return bytes
         }

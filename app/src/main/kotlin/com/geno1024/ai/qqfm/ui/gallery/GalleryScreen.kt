@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.outlined.Lock
@@ -141,7 +142,7 @@ fun GalleryScreen(
                 state.scanning && state.items.isEmpty() -> Centered {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text("正在扫描…")
-                        Text("已发现 ${state.scannedCount} 张")
+                        Text("已发现 ${state.scannedCount} 项")
                     }
                 }
                 state.items.isEmpty() -> Centered {
@@ -155,7 +156,7 @@ fun GalleryScreen(
                         } else if (state.searchQuery.isNotBlank()) {
                             "没有匹配的文字\n只搜索已经识别过的图片"
                         } else {
-                            "没有找到图片"
+                            "没有找到文件"
                         },
                     )
                 }
@@ -205,7 +206,7 @@ private fun GalleryTopBar(
                 )
                 state.selectionActive -> Text("已选 ${state.selection.size} 项")
                 else -> Text(
-                    text = "${state.items.size} 张",
+                    text = "${state.items.size} 项",
                     modifier = Modifier.clickable { showSizeDialog = true },
                 )
             }
@@ -258,7 +259,7 @@ private fun GalleryTopBar(
     if (showSizeDialog) {
         AlertDialog(
             onDismissRequest = { showSizeDialog = false },
-            title = { Text("${state.items.size} 张图片") },
+            title = { Text("${state.items.size} 项") },
             text = {
                 Text(
                     "总大小：${formatGrouped(state.totalBytes)} 字节\n" +
@@ -476,8 +477,10 @@ private fun GridCell(
     onToggleSelection: () -> Unit,
     onToggleFrozen: () -> Unit,
 ) {
+    var settled by remember(item.id) { mutableStateOf(false) }
     val bitmap by produceState<Bitmap?>(initialValue = null, key1 = item.id) {
         value = imageStore.thumbnail(item, 320)
+        settled = true
     }
     Box(
         modifier = Modifier
@@ -493,6 +496,13 @@ private fun GridCell(
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),
+            )
+        } else if (settled && item.source.isVideo) {
+            Icon(
+                Icons.Filled.PlayArrow,
+                contentDescription = "视频",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.align(Alignment.Center).size(40.dp),
             )
         } else {
             CircularProgressIndicator(

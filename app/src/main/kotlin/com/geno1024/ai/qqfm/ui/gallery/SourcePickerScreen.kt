@@ -103,7 +103,7 @@ fun SourcePickerScreen(
                 .verticalScroll(rememberScrollState()),
         ) {
             Text(
-                text = "可以多选，图库会把选中的目录合并成一个列表排序和分组。",
+                text = "可以多选，图库会把选中的目录合并成一个列表排序和分组。视频不参与文字识别。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
@@ -137,7 +137,7 @@ fun SourcePickerScreen(
                             fontFamily = FontFamily.Monospace,
                         )
                         Text(
-                            text = source.dir,
+                            text = source.scanDirs.joinToString("\n"),
                             style = MaterialTheme.typography.bodySmall,
                             fontFamily = FontFamily.Monospace,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -158,5 +158,7 @@ fun SourcePickerScreen(
 private fun sourceHint(source: MediaSource): String = when (source) {
     MediaSource.IMG -> "聊天窗口里展示的图片"
     MediaSource.RAW -> "收到的原始图片"
-    MediaSource.THUMB -> "缩略图"
+    MediaSource.THUMB -> "图片缩略图"
+    MediaSource.VIDEO -> "聊天里播放过的视频，不参与文字识别"
+    MediaSource.VIDEO_THUMB -> "视频缩略图，不参与文字识别"
 }

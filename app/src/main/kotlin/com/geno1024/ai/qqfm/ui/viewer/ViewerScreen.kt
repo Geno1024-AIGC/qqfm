@@ -29,6 +29,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.AlertDialog
@@ -177,7 +178,7 @@ fun ViewerScreen(
         val pending = pendingDeleteId ?: return@LaunchedEffect
         if (items.none { it.id == pending }) {
             pendingDeleteId = null
-            showNotice("已删除 1 张")
+            showNotice("已删除 1 项")
         }
     }
 
@@ -212,20 +213,22 @@ fun ViewerScreen(
                             tint = if (currentFrozen) MaterialTheme.colorScheme.primary else LocalContentColor.current,
                         )
                     }
-                    IconButton(
-                        onClick = {
-                            val item = items.getOrNull(pagerState.currentPage) ?: return@IconButton
-                            if (ocrLoading) return@IconButton
-                            ocrLoading = true
-                            showNotice("识别中…")
-                            onRequestOcr(item) { text ->
-                                ocrLoading = false
-                                ocrText = text?.takeIf { it.isNotBlank() } ?: "(没有识别到文字)"
-                            }
-                        },
-                        enabled = !ocrLoading,
-                    ) {
-                        Text("文", style = MaterialTheme.typography.titleMedium)
+                    if (items.getOrNull(pagerState.currentPage)?.source?.supportsOcr == true) {
+                        IconButton(
+                            onClick = {
+                                val item = items.getOrNull(pagerState.currentPage) ?: return@IconButton
+                                if (ocrLoading) return@IconButton
+                                ocrLoading = true
+                                showNotice("识别中…")
+                                onRequestOcr(item) { text ->
+                                    ocrLoading = false
+                                    ocrText = text?.takeIf { it.isNotBlank() } ?: "(没有识别到文字)"
+                                }
+                            },
+                            enabled = !ocrLoading,
+                        ) {
+                            Text("文", style = MaterialTheme.typography.titleMedium)
+                        }
                     }
                     IconButton(
                         onClick = {
@@ -233,7 +236,7 @@ fun ViewerScreen(
                             // A frozen image only goes away once it is unlocked, and
                             // saying so beats a button that silently does nothing.
                             if (item.id in frozenIds) {
-                                showNotice("这张已冻结，解锁后才能删除")
+                                showNotice("这一项已冻结，解锁后才能删除")
                                 return@IconButton
                             }
                             pendingDeleteId = item.id
@@ -264,9 +267,13 @@ fun ViewerScreen(
                 modifier = Modifier.fillMaxSize(),
             ) { page ->
                 val item = items.getOrNull(page) ?: return@HorizontalPager
-                LaunchedEffect(item.id) { onEnsureOcr(item) }
+                LaunchedEffect(item.id) {
+                    if (item.source.supportsOcr) onEnsureOcr(item)
+                }
+                var settled by remember(item.id) { mutableStateOf(false) }
                 val loaded by produceState<LoadedImage?>(initialValue = null, key1 = item.id) {
                     value = imageStore.viewer(item, 2048)
+                    settled = true
                 }
                 Box(
                     modifier = Modifier
@@ -321,7 +328,30 @@ fun ViewerScreen(
                             },
                             modifier = zoomModifier,
                         )
-                        null -> CircularProgressIndicator(color = Color.White)
+                        null -> {
+                            if (settled && item.source.isVideo) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Icon(
+                                        Icons.Filled.PlayArrow,
+                                        contentDescription = "视频",
+                                        tint = Color.White.copy(alpha = 0.9f),
+                                        modifier = Modifier.size(72.dp),
+                                    )
+                                    Text(
+                                        text = "视频文件",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        color = Color.White,
+                                    )
+                                    Text(
+                                        text = "部分版本没有可用缩略图，暂不支持预览",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = Color.White.copy(alpha = 0.7f),
+                                    )
+                                }
+                            } else {
+                                CircularProgressIndicator(color = Color.White)
+                            }
+                        }
                     }
 
                     if (item.id in frozenIds) {
@@ -413,7 +443,7 @@ fun ViewerScreen(
 
 /** The item's path relative to the chat picture root, e.g. `chatimg/000/Cache_...`. */
 private fun relativePath(item: MediaItem): String =
-    item.path.removePrefix(MediaPaths.ROOT).removePrefix("/")
+    item.path.removePrefix(MediaPaths.TENCENT_ROOT).removePrefix("/")
 
 /**
  * Zoom, pan and double tap on one picture, while leaving page swipes alone.

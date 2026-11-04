@@ -35,12 +35,15 @@ class MediaRepository(
             val items = ArrayList<MediaItem>(200_000)
             file.forEachLine { line ->
                 val parts = line.split('\t')
-                if (parts.size == 4) {
+                if (parts.size == 4 || parts.size == 5) {
                     val path = parts[0]
                     val base = parts[1]
                     val size = parts[2].toLongOrNull() ?: return@forEachLine
                     val mtime = parts[3].toLongOrNull() ?: return@forEachLine
-                    items.add(MediaItem(source, path, base, path.substringAfterLast('/'), size, mtime))
+                    val preview = parts.getOrNull(4)?.takeIf { it.isNotEmpty() }
+                    items.add(
+                        MediaItem(source, path, base, path.substringAfterLast('/'), size, mtime, preview),
+                    )
                 }
             }
             val deleted = deletedIds(source)
@@ -104,8 +107,16 @@ class MediaRepository(
         val items = ArrayList<MediaItem>(200_000)
         val counted = intArrayOf(0)
         val lastReport = longArrayOf(0L)
-        val command = "find ${RootShell.shellQuote(source.dir)}" +
-            " -type f -print0 2>/dev/null" +
+        val roots = source.scanDirs.joinToString(" ") { RootShell.shellQuote(it) }
+        // The video tree also holds its thumbnails under `thumb`/`thumbs`; those
+        // get their own source, so walk past them instead of counting them twice.
+        val prune = if (source.isVideo) {
+            " ! -path " + RootShell.shellQuote("${source.dir}/thumb/*") +
+                " ! -path " + RootShell.shellQuote("${source.dir}/thumbs/*")
+        } else {
+            ""
+        }
+        val command = "find $roots -type f$prune -print0 2>/dev/null" +
             " | xargs -0 -r stat -c '%n\t%s\t%Y' 2>/dev/null"
         RootShell.forEachLine(command) { line ->
             val firstTab = line.indexOf('\t')
@@ -116,8 +127,8 @@ class MediaRepository(
             // stat reports seconds; the rest of the app thinks in milliseconds.
             val mtime = (line.substring(lastTab + 1).toLongOrNull() ?: return@forEachLine) * 1000L
             val name = path.substringAfterLast('/')
-            if (!name.startsWith("Cache_")) return@forEachLine
-            val base = name.removePrefix("Cache_")
+            if (!source.accepts(name)) return@forEachLine
+            val base = source.baseOf(name)
             items.add(MediaItem(source, path, base, name, size, mtime))
             counted[0]++
             val now = System.currentTimeMillis()
@@ -126,8 +137,30 @@ class MediaRepository(
                 onProgress(counted[0])
             }
         }
-        save(source, items)
-        return ScanOutcome(items, items.sumOf { it.size })
+        if (source == MediaSource.VIDEO && items.isNotEmpty()) {
+            // One pass over the thumbnail trees beats a root `cat` per cell: the
+            // gallery can then show a paired preview without guessing names.
+            val thumbs = HashMap<String, String>()
+            val thumbDirs = MediaSource.VIDEO_THUMB.scanDirs
+                .joinToString(" ") { RootShell.shellQuote(it) }
+            RootShell.forEachLine("find $thumbDirs -type f -print0 2>/dev/null") { path ->
+                val name = path.substringAfterLast('/')
+                if (MediaSource.VIDEO_THUMB.accepts(name)) {
+                    thumbs.putIfAbsent(MediaPaths.videoThumbKey(name), path)
+                }
+            }
+            for (index in items.indices) {
+                val item = items[index]
+                items[index] = item.copy(
+                    previewPath = thumbs[MediaPaths.videoKey(item.name)],
+                )
+            }
+        }
+        // `thumb` and `thumbs` are two names for the same tree on different QQ
+        // versions; if both exist, the same file must not appear twice.
+        val unique = if (source == MediaSource.VIDEO_THUMB) items.distinctBy { it.id } else items
+        save(source, unique)
+        return ScanOutcome(unique, unique.sumOf { it.size })
     }
 
     /** Rewrites the on-disk index from an in-memory list. */
@@ -141,7 +174,8 @@ class MediaRepository(
                     writer.append(item.path).append('\t')
                         .append(item.base).append('\t')
                         .append(item.size.toString()).append('\t')
-                        .append(item.mtime.toString()).append('\n')
+                        .append(item.mtime.toString()).append('\t')
+                        .append(item.previewPath.orEmpty()).append('\n')
                 }
             }
             tmp.renameTo(cacheFile(source))

@@ -254,6 +254,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private fun engine(): OcrEngine = ocrEngine ?: OcrEngine().also { ocrEngine = it }
 
     fun ensureOcr(item: MediaItem) {
+        if (!item.source.supportsOcr) return
         if (!ocrInFlight.add(item.id)) return
         viewModelScope.launch {
             try {
@@ -279,6 +280,10 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     /** Hands back the recognized text, running OCR first when it has not been done. */
     fun requestOcrText(item: MediaItem, onReady: (String?) -> Unit) {
+        if (!item.source.supportsOcr) {
+            onReady(null)
+            return
+        }
         viewModelScope.launch {
             val cached = withContext(Dispatchers.IO) { ocrIndex.textOf(item.id) }
             if (!cached.isNullOrBlank()) {
@@ -384,7 +389,10 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 val cached = withContext(Dispatchers.IO) {
                     sources.mapNotNull { source -> repository.loadCached(source) }
                 }
-                if (cached.isNotEmpty()) {
+                // Only reuse the cache when every selected tree has one. Otherwise a
+                // newly added tree (a video directory, say) would silently be left out
+                // just because the older trees already have an index.
+                if (cached.size == sources.size) {
                     applyItems(cached.flatten(), fromScan = false)
                     return@launch
                 }
@@ -422,7 +430,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 loading = false,
                 scanning = false,
                 scannedCount = visible.size,
-                message = if (fromScan) "扫描完成：${visible.size} 张图片" else null,
+                message = if (fromScan) "扫描完成：${visible.size} 项" else null,
             ).withRows()
         }
     }
@@ -536,7 +544,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         }
         if (selected.isEmpty()) {
             if (snapshot.selection.isNotEmpty()) {
-                _state.update { it.copy(message = "冻结的图片要先解锁才能删除") }
+                _state.update { it.copy(message = "冻结的项目要先解锁才能删除") }
             }
             return
         }
@@ -550,7 +558,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 if (result.errorMessage != null) {
                     result.errorMessage
                 } else {
-                    "已删除 ${result.filesRemoved} 张图片，释放约 " + formatBytes(result.bytesReclaimed)
+                    "已删除 ${result.filesRemoved} 项，释放约 " + formatBytes(result.bytesReclaimed)
                 },
                 removed,
                 emptySet(),
@@ -562,7 +570,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     fun deleteOne(item: MediaItem) {
         if (item.id !in byId) return
         if (item.id in _state.value.frozen) {
-            _state.update { it.copy(message = "冻结的图片要先解锁才能删除") }
+            _state.update { it.copy(message = "冻结的项目要先解锁才能删除") }
             return
         }
         viewModelScope.launch {
@@ -574,7 +582,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 if (result.errorMessage != null) {
                     result.errorMessage
                 } else {
-                    "已删除 ${result.filesRemoved} 张图片，释放约 " + formatBytes(result.bytesReclaimed)
+                    "已删除 ${result.filesRemoved} 项，释放约 " + formatBytes(result.bytesReclaimed)
                 },
                 setOf(item.id),
                 _state.value.selection - item.id,
