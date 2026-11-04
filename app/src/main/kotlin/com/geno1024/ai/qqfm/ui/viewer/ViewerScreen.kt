@@ -5,6 +5,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.os.SystemClock
+import android.util.Size
 import android.widget.ImageView
 import android.widget.MediaController
 import android.widget.VideoView
@@ -284,6 +285,11 @@ fun ViewerScreen(
                 // app-private storage before any player can open it.
                 var videoFile by remember(item.id) { mutableStateOf<File?>(null) }
                 var videoPreparing by remember(item.id) { mutableStateOf(false) }
+                // The picture's own pixel size: read out of the file once, since the
+                // on-screen bitmap is only a downsample of it.
+                val dimensions by produceState<Size?>(initialValue = null, key1 = item.id) {
+                    if (!item.source.isVideo) value = imageStore.imageSize(item)
+                }
                 val startPlayback: () -> Unit = {
                     if (!videoPreparing && videoFile == null) {
                         videoPreparing = true
@@ -432,12 +438,23 @@ fun ViewerScreen(
                             )
                             .padding(horizontal = 12.dp, vertical = 8.dp),
                     ) {
+                        // One line keeps a picture's info bar to the height of the
+                        // gradient; a video's path is the only way to tell which
+                        // file it came from, so it wraps instead of being eaten.
                         Text(
                             text = relativePath(item),
                             style = MaterialTheme.typography.labelMedium,
                             color = Color.White,
-                            maxLines = 1,
+                            maxLines = if (item.source.isVideo) Int.MAX_VALUE else 1,
                         )
+                        val dims = dimensions
+                        if (dims != null) {
+                            Text(
+                                text = "${dims.width} × ${dims.height}",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = Color.White.copy(alpha = 0.85f),
+                            )
+                        }
                         Text(
                             text = "${formatBytes(item.size)} · ${formatTimestamp(item.mtime)}",
                             style = MaterialTheme.typography.labelMedium,

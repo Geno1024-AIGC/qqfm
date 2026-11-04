@@ -9,6 +9,7 @@ import android.graphics.drawable.Drawable
 import android.media.MediaMetadataRetriever
 import android.os.Build
 import android.util.LruCache
+import android.util.Size
 import androidx.annotation.RequiresApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Semaphore
@@ -35,6 +36,9 @@ class ImageStore(private val context: Context) {
     private val memory = object : LruCache<String, Bitmap>(memoryCacheSize()) {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
     }
+
+    /** Pixel sizes learned so far; the viewer's info line reads past a miss again. */
+    private val sizes = object : LruCache<String, Size>(SIZE_CACHE_ENTRIES) {}
 
     private val semaphore = Semaphore(4)
 
@@ -68,6 +72,32 @@ class ImageStore(private val context: Context) {
      */
     fun decodeLocalForOcr(file: File, targetPx: Int = 1280): Bitmap? =
         decodeFile(file, targetPx)
+
+    /**
+     * The pixel size of the item's own file, for the viewer's info line.
+     *
+     * A bounds-only decode: no pixels are ever materialised, so the cost is one
+     * file copy. The item's own file is read first — what the viewer displays may
+     * be a thumbnail, but the size worth reporting is the original's.
+     */
+    suspend fun imageSize(item: MediaItem): Size? {
+        sizes.get(item.id)?.let { return it }
+        val dims = withContext(Dispatchers.IO) {
+            semaphore.withPermit {
+                val bytes = readAll(item.path) ?: readCandidates(item)
+                    ?: return@withPermit null
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+                if (bounds.outWidth > 0 && bounds.outHeight > 0) {
+                    Size(bounds.outWidth, bounds.outHeight)
+                } else {
+                    null
+                }
+            }
+        } ?: return null
+        sizes.put(item.id, dims)
+        return dims
+    }
 
     /**
      * A local copy of a video, ready for a player to open.
@@ -377,6 +407,9 @@ private const val MAX_ANIMATION_BYTES = 24L * 1024 * 1024
 
 /** How much raw animation is kept around, in bytes. */
 private const val RAW_CACHE_BYTES = 16L * 1024 * 1024
+
+/** A size line costs the entry alone, so the cache is counted by entry. */
+private const val SIZE_CACHE_ENTRIES = 512
 
 /** How much copied video may sit in the cache before the oldest is dropped. */
 private const val VIDEO_CACHE_BYTES = 256L * 1024 * 1024
