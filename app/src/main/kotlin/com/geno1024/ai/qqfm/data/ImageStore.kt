@@ -12,11 +12,14 @@ import android.util.LruCache
 import android.util.Size
 import androidx.annotation.RequiresApi
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.sqrt
 import java.nio.ByteBuffer
 import kotlin.math.max
@@ -107,30 +110,75 @@ class ImageStore(private val context: Context) {
      * actually asks to play. A copy whose size still matches the file on screen is
      * reused, and the directory is trimmed so browsing videos cannot fill the disk.
      */
-    suspend fun localVideo(item: MediaItem): File? = withContext(Dispatchers.IO) {
+    suspend fun localVideo(item: MediaItem): File? {
         val dir = File(context.cacheDir, "videos").apply { mkdirs() }
         val target = File(dir, item.base.replace(Regex("[^A-Za-z0-9._-]"), "_"))
-        if (target.isFile && target.length() > 0L &&
-            (item.size <= 0L || target.length() == item.size)
-        ) {
-            return@withContext target
+        // Repeat calls skip the lock: same-file callers queue, other files never contend.
+        if (intactCopy(target, item)) return target
+        return withContext(Dispatchers.IO) {
+            copyLocks.getOrPut(item.id) { Mutex() }.withLock {
+                if (intactCopy(target, item)) {
+                    target
+                } else {
+                    pruneVideoCache(dir, target)
+                    // Created as the app first: `cat > existing` truncates in place
+                    // and keeps the ownership, the same trick the OCR batch copy
+                    // relies on.
+                    runCatching { target.createNewFile() }
+                    val command = "cat -- " + RootShell.shellQuote(item.path) +
+                        " > " + RootShell.shellQuote(target.absolutePath) +
+                        " 2>/dev/null && chmod 0644 " + RootShell.shellQuote(target.absolutePath) +
+                        " 2>/dev/null"
+                    runCatching { RootShell.exec(command) }
+                    if (intactCopy(target, item)) {
+                        target
+                    } else {
+                        runCatching { target.delete() }
+                        null
+                    }
+                }
+            }
         }
-        pruneVideoCache(dir, target)
-        // Created as the app first: `cat > existing` truncates in place and keeps
-        // the ownership, the same trick the OCR batch copy relies on.
-        runCatching { target.createNewFile() }
-        val command = "cat -- " + RootShell.shellQuote(item.path) +
-            " > " + RootShell.shellQuote(target.absolutePath) +
-            " 2>/dev/null && chmod 0644 " + RootShell.shellQuote(target.absolutePath) +
-            " 2>/dev/null"
-        runCatching { RootShell.exec(command) }
-        if (target.isFile && target.length() > 0L &&
+    }
+
+    /** True when the copy still matches the file it came from. */
+    private fun intactCopy(target: File, item: MediaItem): Boolean =
+        target.isFile && target.length() > 0L &&
             (item.size <= 0L || target.length() == item.size)
-        ) {
-            target
-        } else {
-            runCatching { target.delete() }
+
+    /** Per-item copy locks; only items actually touched ever allocate one. */
+    private val copyLocks = ConcurrentHashMap<String, Mutex>()
+
+    /**
+     * The size of a video as it is shown, from the local copy's metadata.
+     *
+     * The media library only opens files it can read, so this goes through the same
+     * copy the frame and playback use; where that copy already exists the metadata
+     * comes along almost for free. Rotation is folded in, because a portrait
+     * recording is stored as a landscape matrix.
+     */
+    suspend fun videoSize(item: MediaItem): Size? {
+        sizes.get(item.id)?.let { return it }
+        val local = localVideo(item) ?: return null
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(local.absolutePath)
+            val width = retriever.extractMetadata(
+                MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH,
+            )?.toIntOrNull() ?: return null
+            val height = retriever.extractMetadata(
+                MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT,
+            )?.toIntOrNull() ?: return null
+            val rotation = retriever.extractMetadata(
+                MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION,
+            )?.toIntOrNull() ?: 0
+            val dims = if (rotation == 90 || rotation == 270) Size(height, width) else Size(width, height)
+            sizes.put(item.id, dims)
+            dims
+        } catch (_: Exception) {
             null
+        } finally {
+            runCatching { retriever.release() }
         }
     }
 

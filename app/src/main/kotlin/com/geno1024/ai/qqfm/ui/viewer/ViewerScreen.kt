@@ -285,10 +285,14 @@ fun ViewerScreen(
                 // app-private storage before any player can open it.
                 var videoFile by remember(item.id) { mutableStateOf<File?>(null) }
                 var videoPreparing by remember(item.id) { mutableStateOf(false) }
-                // The picture's own pixel size: read out of the file once, since the
+                // The item's own pixel size: read out of the file once, since the
                 // on-screen bitmap is only a downsample of it.
                 val dimensions by produceState<Size?>(initialValue = null, key1 = item.id) {
-                    if (!item.source.isVideo) value = imageStore.imageSize(item)
+                    value = if (item.source.isVideo) {
+                        imageStore.videoSize(item)
+                    } else {
+                        imageStore.imageSize(item)
+                    }
                 }
                 val startPlayback: () -> Unit = {
                     if (!videoPreparing && videoFile == null) {
