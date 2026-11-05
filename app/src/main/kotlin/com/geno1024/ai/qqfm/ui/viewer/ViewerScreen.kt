@@ -5,6 +5,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.os.SystemClock
+import android.util.Log
 import android.util.Size
 import android.widget.ImageView
 import android.widget.MediaController
@@ -340,9 +341,16 @@ fun ViewerScreen(
                     if (item.source.isVideo && readyVideo != null) {
                         VideoPlayer(
                             file = readyVideo,
-                            onError = {
+                            onError = { what, extra ->
+                                // The codes tell a broken file apart from a codec
+                                // the device lacks, so both log and notice carry
+                                // them instead of a bare "failed".
+                                Log.w(
+                                    TAG,
+                                    "Video playback failed: ${item.path} (what=$what extra=$extra)",
+                                )
                                 videoFile = null
-                                showNotice("无法播放该视频")
+                                showNotice("无法播放该视频 ($what/$extra)")
                             },
                         )
                     } else when (val image = loaded) {
@@ -527,7 +535,7 @@ private fun relativePath(item: MediaItem): String =
  * every recomposition and restarting a playing video would be a bug.
  */
 @Composable
-private fun VideoPlayer(file: File, onError: () -> Unit) {
+private fun VideoPlayer(file: File, onError: (Int, Int) -> Unit) {
     var player by remember { mutableStateOf<VideoView?>(null) }
     DisposableEffect(file) {
         onDispose {
@@ -543,8 +551,8 @@ private fun VideoPlayer(file: File, onError: () -> Unit) {
                 controller.setAnchorView(this)
                 setMediaController(controller)
                 setOnPreparedListener { it.isLooping = false; start() }
-                setOnErrorListener { _, _, _ ->
-                    onError()
+                setOnErrorListener { _, what, extra ->
+                    onError(what, extra)
                     true
                 }
                 player = this
@@ -619,6 +627,9 @@ private suspend fun PointerInputScope.detectImageGestures(
 }
 
 /** Below this the picture counts as shown as-is, and swipes belong to the pager. */
+/** Log tag for the viewer; playback failures land here with their codes. */
+private const val TAG = "ViewerScreen"
+
 private const val RESTING_SCALE = 1.01f
 private const val MAX_SCALE = 5f
 private const val DOUBLE_TAP_SCALE = 2.5f
