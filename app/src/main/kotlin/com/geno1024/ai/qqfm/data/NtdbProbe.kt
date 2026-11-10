@@ -75,44 +75,21 @@ object NtdbProbe {
                 ?.let { "QQ：$it" } ?: "QQ：版本未知",
         )
 
-        // ---- which accounts have ever logged in here ----
-        val uidFiles = RootShell.exec("ls -1 -- ${q(UID_DIR)} 2>/dev/null").output
-            .lineSequence().map(String::trim).filter { "###" in it }.toList()
-            .ifEmpty {
-                RootShell.exec(
-                    "find /data/user/0/com.tencent.mobileqq/files -maxdepth 3 " +
-                        "-name '*###*' -print 2>/dev/null | head -5",
-                ).output.lineSequence().map { it.substringAfterLast('/') }
-                    .filter { "###" in it }.toList()
-            }
-        say("uid 文件：${uidFiles.joinToString(" ").ifEmpty { "未找到" }}")
-        val accounts = uidFiles.mapNotNull { name ->
-            val parts = name.split("###", limit = 2)
-            if (parts.size != 2) null else Account(parts[0], parts[1], dbPathFor(parts[1]))
-        }
-        if (accounts.isEmpty()) {
-            say("❌ 拿不到 nt_uid，停止。")
-            return@withContext out.toString()
-        }
-
-        // The directory name is derived from the *current* account, so the file the
-        // formula predicts is the primary candidate; a `find` proves what is there.
+        // ---- locate the message database (independent of uid) ----
         val present = RootShell.exec(
             "find ${q(DB_ROOT)} -maxdepth 3 -name nt_msg.db -print 2>/dev/null | head -5",
         ).output.lines().filter(String::isNotBlank)
         say("nt_db 下的 nt_msg.db：${present.joinToString(" ").ifEmpty { "无" }}")
         if (present.isEmpty()) {
             say("❌ 没有 nt_msg.db（此 QQ 可能不是 NT 库），停止。")
+            say(
+                "nt_db 目录：" +
+                    RootShell.exec("ls -la -- ${q(DB_ROOT)}").output.trim().ifEmpty { "（读不到）" },
+            )
             return@withContext out.toString()
         }
-        val account = accounts.firstOrNull { it.path in present }
-        val dbPath = account?.path ?: present.first().also {
-            say("⚠️ 按 uid 推导的路径都不存在，改用发现的文件（uid 可能不匹配）")
-        }
-        val who = account ?: accounts.first()
-        val uidHash = md5(who.ntUid)
-        say("nt_uid = ${who.ntUid}")
-        say("md5(nt_uid) = $uidHash")
+        val dbPath = present.first()
+        if (present.size > 1) say("⚠️ 发现 ${present.size} 个 nt_msg.db，取第一个")
         say("db = $dbPath")
         say(
             RootShell.exec(
@@ -147,11 +124,84 @@ object NtdbProbe {
         val randCandidates = ordered.filter { candidate ->
             candidate.length in 4..24 && HMAC_ALGOS.none { candidate.startsWith(it) }
         }.take(24)
-        if (randCandidates.isEmpty()) {
-            say("❌ 头里没有可用的 rand 候选，停止。")
+        say("rand 候选 ${randCandidates.size}：${randCandidates.joinToString(" ").ifEmpty { "无" }}")
+
+        // ---- locate nt_uid: three independent sources, each reported verbatim ----
+        // The last run stopped at "未找到" with no clue why, so every source keeps
+        // its raw output (errors included) and a miss does not abort before the
+        // other sources and the header have had their say.
+        val uidDirLs = RootShell.exec("ls -1 -- ${q(UID_DIR)}").output
+            .lineSequence().map(String::trim).filter { it.isNotEmpty() }.toList()
+        say("uid/ 目录：${uidDirLs.joinToString(" ").ifEmpty { "（空）" }}")
+        val fromDirNames = if (uidDirLs.any { "###" in it }) {
+            uidDirLs.filter { "###" in it }
+        } else {
+            RootShell.exec(
+                "find /data/user/0/com.tencent.mobileqq/files -maxdepth 4 " +
+                    "-name '*###*' -print 2>/dev/null | head -5",
+            ).output.lineSequence().map { it.substringAfterLast('/') }
+                .filter { "###" in it }.toList()
+        }
+        // The channel database is named gpro_v1-6_<nt_uid>.db — uid in plain sight.
+        val fromGpro = RootShell.exec(
+            "ls -1 -- ${q(DB_ROOT)}/nt_qq_*/gpro_v1-6_*.db 2>/dev/null | head -5",
+        ).output.lineSequence().map(String::trim)
+            .mapNotNull { GPRO_UID.find(it)?.groupValues?.get(1) }
+            .map { uid -> Account("", uid, dbPathFor(uid)) }.toList()
+        // beacon_db carries "home_uin":…,"uid":… pairs as plain text.
+        val beaconPath = "/data/user/0/com.tencent.mobileqq/databases/beacon_db_com.tencent.mobileqq"
+        val beaconHits = RootShell.exec(
+            "grep -oE '\"home_uin\": *\"[0-9]+\"|\"uid\": *\"u_[A-Za-z0-9_-]+\"' " +
+                "${q(beaconPath)} | head -6",
+        ).output.lineSequence().map(String::trim).filter { it.isNotEmpty() }.toList()
+        say("beacon_db：${beaconHits.joinToString(" ").ifEmpty { "未见 uid（文件可能不存在）" }}")
+
+        val fromBeacon = ArrayList<Account>()
+        var pendingUin: String? = null
+        for (hit in beaconHits) {
+            val uin = BEACON_UIN.find(hit)?.groupValues?.get(1)
+            if (uin != null) {
+                pendingUin = uin
+                continue
+            }
+            val uid = BEACON_UID.find(hit)?.groupValues?.get(1)
+            val previousUin = pendingUin
+            if (uid != null && previousUin != null) {
+                fromBeacon += Account(previousUin, uid, dbPathFor(uid))
+                pendingUin = null
+            }
+        }
+
+        val accounts = (fromDirNames.mapNotNull { name ->
+            val parts = name.split("###", limit = 2)
+            if (parts.size == 2 && parts[0].all { it.isDigit() }) {
+                Account(parts[0], parts[1], dbPathFor(parts[1]))
+            } else {
+                null
+            }
+        } + fromGpro + fromBeacon).distinctBy { it.ntUid }
+
+        if (accounts.isEmpty() || randCandidates.isEmpty()) {
+            if (accounts.isEmpty()) {
+                say("❌ 三路来源都没拿到 nt_uid（uid 目录 / gpro 文件名 / beacon_db，见上）。")
+                say("   rand 已解析：${randCandidates.firstOrNull() ?: "无"}——补上任一来源即可继续。")
+            }
+            if (randCandidates.isEmpty()) say("❌ 头里没有可用的 rand 候选，停止。")
             return@withContext out.toString()
         }
-        say("rand 候选 ${randCandidates.size}：${randCandidates.joinToString(" ")}")
+
+        // The directory name is derived from the account, so a uid whose predicted
+        // path is the file we found is the one whose key we want.
+        val matched = accounts.firstOrNull { it.path in present }
+        if (matched == null) {
+            say("⚠️ 没有 uid 推导出的路径与实际 db 吻合（公式/uid 不匹配），仍按发现的文件继续")
+        }
+        accounts.forEach { acc ->
+            say(
+                "nt_uid = ${acc.ntUid}（uin ${acc.uin.ifEmpty { "?" }}） " +
+                    "md5=${md5(acc.ntUid)} ${if (acc.path in present) "→ ✓ 就是该 db" else ""}",
+            )
+        }
 
         // ---- derive and try: every assumption is a loop until the header agrees ----
         // SQLCipher feeds PBKDF2 the ASCII bytes of the key string; Java's provider
@@ -165,7 +215,10 @@ object NtdbProbe {
             if (nativeKdf) pbkdf2Native(keyHex, salt, iterations)
             else pbkdf2Manual(keyHex.toByteArray(Charsets.US_ASCII), salt, iterations, AES_BITS / 8)
 
-        val prefixes = listOf(uidHash, who.uin)
+        // Every account contributes both key-prefix shapes the docs mention:
+        // md5(nt_uid) (the documented one) and the bare uin.
+        val prefixes = accounts.flatMap { listOf(md5(it.ntUid), it.uin) }
+            .filter { it.isNotEmpty() }.distinct()
         // reserve = round_up(16 + hmac, 16): 48 for HMAC-SHA1/SHA256, 80 for
         // SHA-512, 16 when HMAC is off — the impossible 36 is deliberately absent.
         val geometries = listOf(
@@ -217,8 +270,8 @@ object NtdbProbe {
         var found = pass(KDF_NORMAL, randCandidates, prefixes)
         // SQLCipher's own default KDF counts, in case this build never set kdf_iter
         // to 4000 — narrowed so a fallback cannot turn into minutes of hashing.
-        if (found == null) found = pass(KDF_SQL3, randCandidates.take(8), listOf(uidHash))
-        if (found == null) found = pass(KDF_LEGACY, randCandidates.take(8), listOf(uidHash))
+        if (found == null) found = pass(KDF_SQL3, randCandidates.take(8), prefixes.take(1))
+        if (found == null) found = pass(KDF_LEGACY, randCandidates.take(8), prefixes.take(1))
         if (found == null) {
             say("❌ 尝试 $tries 次、${derived.size} 个派生密钥都没得到合法的 SQLite 头。")
             combos.firstOrNull()?.let { combo ->
@@ -639,6 +692,13 @@ private val KAT_SALT = "saltsaltsaltsalt".toByteArray(Charsets.US_ASCII)
 private const val KAT_DK = "f0c0ad822517732ef37081f0f992ef4be6dc325438a60df184b1011e397f6052"
 
 private val HMAC_ALGOS = listOf("HMAC_SHA1", "HMAC_SHA256", "HMAC_SHA512")
+
+/** `gpro_v1-6_<nt_uid>.db` — the channel database carries nt_uid in its name. */
+private val GPRO_UID = Regex("gpro_v1-6_(u_[A-Za-z0-9_-]+)\\.db")
+
+/** `beacon_db` text pairs: `"home_uin": "390251789"` … `"uid": "u_…"`. */
+private val BEACON_UIN = Regex("\"home_uin\": *\"([0-9]+)\"")
+private val BEACON_UID = Regex("\"uid\": *\"(u_[A-Za-z0-9_-]+)\"")
 
 /** Table b-tree page types. */
 private const val INTERIOR_TABLE = 5
