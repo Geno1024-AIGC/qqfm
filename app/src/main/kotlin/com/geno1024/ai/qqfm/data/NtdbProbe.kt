@@ -1,7 +1,7 @@
-// Root reaches QQ's private data by absolute path — Context.getFilesDir()
-// would point at *our* data, which is never what this file wants. Which user
-// id (0 / work profile / clone) and which layout that absolute path uses
-// varies by device, so the probe locates the data directory at runtime.
+// QQ lives under /data/user/0/... and root reaches it by absolute path —
+// Context.getFilesDir() would point at *our* data, which is never what this
+// file wants, so the hard-coded paths are the point. When this shell cannot
+// see a path a root shell can, the probe reports the break instead of guessing.
 @file:SuppressLint("SdCardPath")
 
 package com.geno1024.ai.qqfm.data
@@ -76,49 +76,44 @@ object NtdbProbe {
                 ?.let { "QQ：$it" } ?: "QQ：版本未知",
         )
 
-        // ---- locate QQ's data directory: user id (0 / work profile / clone) and
-        // layout both vary by device — the last run's hard-coded /data/user/0
-        // path did not exist on this one, so find it and derive everything below ----
-        val dataDirs = RootShell.exec(
-            "find /data/user /data/user_de /data/data -maxdepth 3 -type d " +
-                "-name com.tencent.mobileqq -print 2>/dev/null | head -5",
-        ).output.lines().filter(String::isNotBlank)
-        say("QQ 数据目录：${dataDirs.joinToString(" ").ifEmpty { "未找到" }}")
-        val dataDir = dataDirs.firstOrNull()
-        if (dataDir == null) {
-            say("❌ 找不到 QQ 数据目录，停止。")
-            say("/data/user：" + RootShell.exec("ls -la -- /data/user").output.trim().ifEmpty { "（读不到）" })
-            say(
-                "/data/data 下 qq 相关：" +
-                    RootShell.exec("ls -1 -- /data/data | grep -i qq").output.trim().ifEmpty { "（无）" },
-            )
-            return@withContext out.toString()
-        }
+        // The documented layout, hand-confirmed on this device — no scanning.
+        // One run's su saw this exact path missing while a root shell did not,
+        // so a miss gets diagnosed (which chain element broke, root or not)
+        // instead of being papered over by a search.
+        val dataDir = "/data/user/0/com.tencent.mobileqq"
         val dbRoot = "$dataDir/databases/nt_db"
         val uidDir = "$dataDir/files/uid"
         fun dbPathFor(ntUid: String): String =
             "$dbRoot/nt_qq_${md5(md5(ntUid) + "nt_kernel")}/nt_msg.db"
+        say("root：" + RootShell.exec("id").output.trim())
 
         // ---- locate the message database (independent of uid) ----
         // Multiple accounts mean multiple nt_msg.db; the docs say to pick by file
-        // mtime, so `ls -t` decides — `find` only backs up when the glob misses,
-        // and it searches the whole data dir in case this QQ moved nt_db.
-        val newest = RootShell.exec(
+        // mtime, so `ls -t` decides.
+        val present = RootShell.exec(
             "ls -t -- ${q(dbRoot)}/nt_qq_*/nt_msg.db 2>/dev/null | head -5",
-        ).output.lines().filter(String::isNotBlank)
-        val present = if (newest.isNotEmpty()) newest else RootShell.exec(
-            "find ${q(dataDir)} -maxdepth 6 -name nt_msg.db -print 2>/dev/null | head -5",
         ).output.lines().filter(String::isNotBlank)
         say("nt_msg.db：${present.joinToString(" ").ifEmpty { "无" }}")
         if (present.isEmpty()) {
-            say("❌ 没有 nt_msg.db（此 QQ 可能不是 NT 库），停止。")
+            say("❌ 没有 nt_msg.db，停止。")
+            // One ls over the path chain: whichever line says "No such file" is
+            // the element this shell cannot see. stderr is kept on purpose.
             say(
-                "nt_db 目录：" +
-                    RootShell.exec("ls -la -- ${q(dbRoot)}").output.trim().ifEmpty { "（读不到）" },
+                "路径链：" +
+                    RootShell.exec(
+                        "ls -ld -- /data/user /data/user/0 ${q(dataDir)} " +
+                            "${q(dataDir)}/databases ${q(dbRoot)}",
+                    ).output.trim().ifEmpty { "（读不到）" },
             )
             say(
-                "databases 目录：" +
-                    RootShell.exec("ls -1 -- ${q(dataDir)}/databases").output.trim().ifEmpty { "（读不到）" },
+                "/data/user/0：" +
+                    RootShell.exec("ls -1 -- /data/user/0 | head -20")
+                        .output.trim().ifEmpty { "（读不到）" },
+            )
+            say(
+                "databases：" +
+                    RootShell.exec("ls -1 -- ${q(dataDir)}/databases | head -20")
+                        .output.trim().ifEmpty { "（读不到）" },
             )
             return@withContext out.toString()
         }
