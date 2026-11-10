@@ -96,10 +96,9 @@ object NtdbProbe {
         say("nt_msg.db：${present.joinToString(" ").ifEmpty { "无" }}")
         if (present.isEmpty()) {
             say("❌ 没有 nt_msg.db，停止。")
-            // Cheap targeted facts, no scanning: this shell sees a /data/user/0
-            // with two entries where a root shell sees QQ, so pin down which
-            // users exist, where the system thinks QQ lives, and whether this
-            // shell's mount namespace even is the global one.
+            // Targeted facts, no scanning: with the namespace fixed these paths
+            // resolve, so a remaining miss means the layout moved — show what
+            // nt_db actually holds.
             fun diag(label: String, cmd: String) =
                 say("$label：" + RootShell.exec(cmd).output.trim().ifEmpty { "（无输出）" })
             diag(
@@ -107,6 +106,7 @@ object NtdbProbe {
                 "ls -ld -- /data/user /data/user/0 ${q(dataDir)} " +
                     "${q(dataDir)}/databases ${q(dbRoot)}",
             )
+            diag("nt_db 内容", "ls -la -- ${q(dbRoot)}")
             diag("/data/user/0", "ls -1 -- /data/user/0 | head -20")
             diag("/data/user", "ls -1 -- /data/user")
             diag("users", "pm list users")

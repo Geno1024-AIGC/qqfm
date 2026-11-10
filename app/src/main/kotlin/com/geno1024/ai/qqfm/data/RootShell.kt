@@ -48,12 +48,16 @@ object RootShell {
      * shell on the device — saw the real directory. Commands therefore compare
      * this shell's namespace with init's once; on an unisolated device the
      * prefix stays empty and nothing changes.
+     *
+     * The command is wrapped in `sh -c` inside nsenter: globs are expanded by
+     * whatever shell parses the command first, and the outer shell still lives
+     * in the isolated namespace where those paths do not exist.
      */
     private val nsPrefix: String by lazy {
         runCatching {
             val lines = shellResult(
                 "readlink /proc/self/ns/mnt; readlink /proc/1/ns/mnt; command -v nsenter; " +
-                    "nsenter -t 1 -m -- readlink /proc/self/ns/mnt",
+                    "nsenter -t 1 -m -- sh -c " + shellQuote("readlink /proc/self/ns/mnt"),
                 0,
             ).output.lineSequence().map(String::trim).toList()
             val self = lines.getOrNull(0).orEmpty()
@@ -64,12 +68,16 @@ object RootShell {
                 self.isNotEmpty() && self != initNs &&
                 nsenter.isNotEmpty() && moved == initNs
             ) {
-                "nsenter -t 1 -m -- "
+                "nsenter -t 1 -m -- sh -c "
             } else {
                 ""
             }
         }.getOrDefault("")
     }
+
+    /** Runs [command] as-is when no scoping is needed, quoted for the inner shell when there is. */
+    private fun scoped(command: String): String =
+        if (nsPrefix.isEmpty()) command else nsPrefix + shellQuote(command)
 
     /** Streams a command's output line by line without buffering the whole thing. */
     fun forEachLine(command: String, action: (String) -> Unit) = oneShotStream(command, action)
@@ -120,7 +128,7 @@ object RootShell {
      * the binary payload on stdout stays clean.
      */
     fun openRead(path: String): CloseableStream {
-        val process = ProcessBuilder("su", "-c", nsPrefix + "cat -- ${shellQuote(path)} 2>/dev/null")
+        val process = ProcessBuilder("su", "-c", scoped("cat -- ${shellQuote(path)} 2>/dev/null"))
             .redirectErrorStream(false)
             .start()
         return CloseableStream(process.inputStream, process)
@@ -148,7 +156,7 @@ object RootShell {
     // ---- one-shot fallbacks, used when the shared shell is unavailable ----
 
     private fun oneShot(command: String, timeoutSeconds: Long): ShellResult =
-        shellResult(nsPrefix + command, timeoutSeconds)
+        shellResult(scoped(command), timeoutSeconds)
 
     /** Runs [command] verbatim — the namespace detection above needs a way in that cannot recurse. */
     private fun shellResult(command: String, timeoutSeconds: Long): ShellResult {
@@ -173,7 +181,7 @@ object RootShell {
     }
 
     private fun oneShotStream(command: String, action: (String) -> Unit) {
-        val process = ProcessBuilder("su", "-c", nsPrefix + command)
+        val process = ProcessBuilder("su", "-c", scoped(command))
             .redirectErrorStream(true)
             .start()
         try {
@@ -190,7 +198,7 @@ object RootShell {
 
     /** Raw bytes, never through a reader: pictures are not text and UTF-8 would ruin them. */
     private fun oneShotRead(command: String): ByteArray? = runCatching {
-        val process = ProcessBuilder("su", "-c", nsPrefix + command)
+        val process = ProcessBuilder("su", "-c", scoped(command))
             .redirectErrorStream(false)
             .start()
         try {
@@ -316,7 +324,7 @@ object RootShell {
                 TimeUnit.MILLISECONDS,
             )
             return runCatching {
-                val payload = "{ ${nsPrefix}$command ; } 2>&1; printf '%s:%s\\n' '${token}' \"\$?\"\n"
+                val payload = "{ ${scoped(command)} ; } 2>&1; printf '%s:%s\\n' '${token}' \"\$?\"\n"
                 writer?.write(payload.toByteArray(StandardCharsets.UTF_8)) ?: error("no writer")
                 writer?.flush() ?: error("no flush")
                 Deadline(watchdogTask, finished)
