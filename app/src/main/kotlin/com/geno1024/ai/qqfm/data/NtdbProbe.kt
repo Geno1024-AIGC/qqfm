@@ -96,25 +96,25 @@ object NtdbProbe {
         say("nt_msg.db：${present.joinToString(" ").ifEmpty { "无" }}")
         if (present.isEmpty()) {
             say("❌ 没有 nt_msg.db，停止。")
-            // One ls over the path chain: whichever line says "No such file" is
-            // the element this shell cannot see. stderr is kept on purpose.
-            say(
-                "路径链：" +
-                    RootShell.exec(
-                        "ls -ld -- /data/user /data/user/0 ${q(dataDir)} " +
-                            "${q(dataDir)}/databases ${q(dbRoot)}",
-                    ).output.trim().ifEmpty { "（读不到）" },
+            // Cheap targeted facts, no scanning: this shell sees a /data/user/0
+            // with two entries where a root shell sees QQ, so pin down which
+            // users exist, where the system thinks QQ lives, and whether this
+            // shell's mount namespace even is the global one.
+            fun diag(label: String, cmd: String) =
+                say("$label：" + RootShell.exec(cmd).output.trim().ifEmpty { "（无输出）" })
+            diag(
+                "路径链",
+                "ls -ld -- /data/user /data/user/0 ${q(dataDir)} " +
+                    "${q(dataDir)}/databases ${q(dbRoot)}",
             )
-            say(
-                "/data/user/0：" +
-                    RootShell.exec("ls -1 -- /data/user/0 | head -20")
-                        .output.trim().ifEmpty { "（读不到）" },
-            )
-            say(
-                "databases：" +
-                    RootShell.exec("ls -1 -- ${q(dataDir)}/databases | head -20")
-                        .output.trim().ifEmpty { "（读不到）" },
-            )
+            diag("/data/user/0", "ls -1 -- /data/user/0 | head -20")
+            diag("/data/user", "ls -1 -- /data/user")
+            diag("users", "pm list users")
+            diag("QQ dataDir", "dumpsys package com.tencent.mobileqq | grep -m1 dataDir")
+            diag("ns(mnt)", "readlink /proc/self/ns/mnt; readlink /proc/1/ns/mnt")
+            diag("root", "readlink /proc/self/root")
+            diag("mount /data/data", "grep ' /data/data ' /proc/self/mountinfo")
+            diag("init ns 视角", "nsenter -t 1 -m -- ls -1 /data/user/0 | head -10")
             return@withContext out.toString()
         }
         val dbPath = present.first()
