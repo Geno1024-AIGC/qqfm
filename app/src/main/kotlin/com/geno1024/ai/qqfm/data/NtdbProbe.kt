@@ -76,7 +76,12 @@ object NtdbProbe {
         )
 
         // ---- locate the message database (independent of uid) ----
-        val present = RootShell.exec(
+        // Multiple accounts mean multiple nt_msg.db; the docs say to pick by file
+        // mtime, so `ls -t` decides — `find` only backs up when the glob misses.
+        val newest = RootShell.exec(
+            "ls -t -- ${q(DB_ROOT)}/nt_qq_*/nt_msg.db 2>/dev/null | head -5",
+        ).output.lines().filter(String::isNotBlank)
+        val present = if (newest.isNotEmpty()) newest else RootShell.exec(
             "find ${q(DB_ROOT)} -maxdepth 3 -name nt_msg.db -print 2>/dev/null | head -5",
         ).output.lines().filter(String::isNotBlank)
         say("nt_db 下的 nt_msg.db：${present.joinToString(" ").ifEmpty { "无" }}")
