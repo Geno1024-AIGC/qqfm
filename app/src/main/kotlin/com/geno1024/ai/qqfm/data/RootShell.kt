@@ -64,6 +64,25 @@ object RootShell {
     fun readBytes(path: String): ByteArray? = oneShotRead("cat -- ${shellQuote(path)} 2>/dev/null")
 
     /**
+     * Reads at most [length] bytes of [path] starting at [offset], one `su` per read.
+     *
+     * `dd` seeks instead of streaming, so the head of a multi-gigabyte file and a
+     * page deep inside it each cost one read rather than the whole file down the
+     * pipe. QQ's message database sits its pages on 1 KiB boundaries past the
+     * custom header, so aligned reads use 1 KiB blocks; the `bs=1` fallback stays
+     * only for offsets `dd` could not block-seek cheaply.
+     */
+    fun readBytesAt(path: String, offset: Long, length: Int): ByteArray? {
+        val seek = when {
+            offset == 0L -> "bs=$length count=1"
+            offset % 1024L == 0L && length % 1024 == 0 ->
+                "bs=1024 skip=${offset / 1024L} count=${length / 1024}"
+            else -> "bs=1 skip=$offset count=$length"
+        }
+        return oneShotRead("dd if=${shellQuote(path)} $seek 2>/dev/null")
+    }
+
+    /**
      * Opens a root-owned file for reading. The returned stream owns the `su`
      * process; closing it releases both. stderr is discarded inside the shell so
      * the binary payload on stdout stays clean.

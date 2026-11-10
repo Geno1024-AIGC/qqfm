@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -37,7 +38,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -48,12 +51,14 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.geno1024.ai.qqfm.BuildConfig
+import com.geno1024.ai.qqfm.data.NtdbProbe
 import com.geno1024.ai.qqfm.data.OcrScanProgress
 import com.geno1024.ai.qqfm.data.OcrScanStatus
 import com.geno1024.ai.qqfm.ocr.formatDuration
 import com.geno1024.ai.qqfm.ui.formatBytes
 import com.geno1024.ai.qqfm.ui.update.UpdatesSection
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * What this app is, which build it is, what it has cleaned up, and the one setting
@@ -109,6 +114,13 @@ fun AboutScreen(
         now = SystemClock.elapsedRealtime()
     }
     val elapsed = ocrScan.elapsedMillis(now)
+
+    // The probe talks to root and finishes in seconds; the report stays on screen
+    // so its numbers can be read off, selected and copied afterwards.
+    var probeRunning by remember { mutableStateOf(false) }
+    var probeReport by remember { mutableStateOf<String?>(null) }
+    val probeScope = rememberCoroutineScope()
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -363,6 +375,60 @@ fun AboutScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+
+            HorizontalDivider()
+
+            Text(
+                text = "消息数据库（调试）",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainer)
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(
+                    text = "只读探测 QQ 的聊天记录库 nt_msg.db：定位文件、离线推导密钥、" +
+                        "尝试解密第一页并列出全部表名。这是“按会话分类图库”的可行性验证，" +
+                        "全程只读，不复制、不改动 QQ 的任何数据。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Button(
+                    onClick = {
+                        probeRunning = true
+                        probeScope.launch {
+                            probeReport = runCatching { NtdbProbe.run() }.getOrElse { error ->
+                                "❌ 探针异常：${error.javaClass.simpleName}: ${error.message}"
+                            }
+                            probeRunning = false
+                        }
+                    },
+                    enabled = !probeRunning,
+                ) {
+                    Text(
+                        text = when {
+                            probeRunning -> "正在探测…"
+                            probeReport == null -> "开始探测"
+                            else -> "重新探测"
+                        },
+                    )
+                }
+                val report = probeReport
+                if (report != null) {
+                    SelectionContainer {
+                        Text(
+                            text = report,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                }
             }
 
             HorizontalDivider()
