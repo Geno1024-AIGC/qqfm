@@ -39,6 +39,38 @@ object RootShell {
     fun exec(command: String, timeoutSeconds: Long = 0): ShellResult =
         oneShot(command, timeoutSeconds)
 
+    /**
+     * Prefix that moves a command into init's mount namespace, if needed.
+     *
+     * su can hand back an isolated namespace: KernelSU gave this app's shell a
+     * view where /data/data was a tmpfs holding two entries and QQ's whole data
+     * directory was missing, while init's namespace — and every other root
+     * shell on the device — saw the real directory. Commands therefore compare
+     * this shell's namespace with init's once; on an unisolated device the
+     * prefix stays empty and nothing changes.
+     */
+    private val nsPrefix: String by lazy {
+        runCatching {
+            val lines = shellResult(
+                "readlink /proc/self/ns/mnt; readlink /proc/1/ns/mnt; command -v nsenter; " +
+                    "nsenter -t 1 -m -- readlink /proc/self/ns/mnt",
+                0,
+            ).output.lineSequence().map(String::trim).toList()
+            val self = lines.getOrNull(0).orEmpty()
+            val initNs = lines.getOrNull(1).orEmpty()
+            val nsenter = lines.getOrNull(2).orEmpty()
+            val moved = lines.getOrNull(3).orEmpty()
+            if (
+                self.isNotEmpty() && self != initNs &&
+                nsenter.isNotEmpty() && moved == initNs
+            ) {
+                "nsenter -t 1 -m -- "
+            } else {
+                ""
+            }
+        }.getOrDefault("")
+    }
+
     /** Streams a command's output line by line without buffering the whole thing. */
     fun forEachLine(command: String, action: (String) -> Unit) = oneShotStream(command, action)
 
@@ -88,7 +120,7 @@ object RootShell {
      * the binary payload on stdout stays clean.
      */
     fun openRead(path: String): CloseableStream {
-        val process = ProcessBuilder("su", "-c", "cat -- ${shellQuote(path)} 2>/dev/null")
+        val process = ProcessBuilder("su", "-c", nsPrefix + "cat -- ${shellQuote(path)} 2>/dev/null")
             .redirectErrorStream(false)
             .start()
         return CloseableStream(process.inputStream, process)
@@ -115,7 +147,11 @@ object RootShell {
 
     // ---- one-shot fallbacks, used when the shared shell is unavailable ----
 
-    private fun oneShot(command: String, timeoutSeconds: Long): ShellResult {
+    private fun oneShot(command: String, timeoutSeconds: Long): ShellResult =
+        shellResult(nsPrefix + command, timeoutSeconds)
+
+    /** Runs [command] verbatim — the namespace detection above needs a way in that cannot recurse. */
+    private fun shellResult(command: String, timeoutSeconds: Long): ShellResult {
         val process = ProcessBuilder("su", "-c", command)
             .redirectErrorStream(true)
             .start()
@@ -137,7 +173,7 @@ object RootShell {
     }
 
     private fun oneShotStream(command: String, action: (String) -> Unit) {
-        val process = ProcessBuilder("su", "-c", command)
+        val process = ProcessBuilder("su", "-c", nsPrefix + command)
             .redirectErrorStream(true)
             .start()
         try {
@@ -154,7 +190,7 @@ object RootShell {
 
     /** Raw bytes, never through a reader: pictures are not text and UTF-8 would ruin them. */
     private fun oneShotRead(command: String): ByteArray? = runCatching {
-        val process = ProcessBuilder("su", "-c", command)
+        val process = ProcessBuilder("su", "-c", nsPrefix + command)
             .redirectErrorStream(false)
             .start()
         try {
@@ -280,7 +316,7 @@ object RootShell {
                 TimeUnit.MILLISECONDS,
             )
             return runCatching {
-                val payload = "{ $command ; } 2>&1; printf '%s:%s\\n' '${token}' \"\$?\"\n"
+                val payload = "{ ${nsPrefix}$command ; } 2>&1; printf '%s:%s\\n' '${token}' \"\$?\"\n"
                 writer?.write(payload.toByteArray(StandardCharsets.UTF_8)) ?: error("no writer")
                 writer?.flush() ?: error("no flush")
                 Deadline(watchdogTask, finished)
