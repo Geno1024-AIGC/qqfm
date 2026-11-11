@@ -35,9 +35,9 @@ CIPHER_END = PAGE - RESERVE  # 4048
 HEADER = 1024
 
 # Message-body fixtures, mirroring the structure parsed from the live device:
-# outer f40800 → element with f40010 (type), f45402 (name), f45406 (raw md5),
-# f45405 (size), f45424 (md5 as hex). The text body carries hex-looking noise
-# in fields the extractor must ignore.
+# outer f40800 → element with f45002 (type; f40010 in older builds), f45402
+# (name), f45406 (raw md5), f45405 (size), f45424 (md5 as hex). The text body
+# carries hex-looking noise in fields the extractor must ignore.
 IMG_MD5 = "28e13060375d9b8e2f95960f578e6eae"
 IMG2_MD5 = "0f4b1c7a9d3e5268b0ac41d7e93f2a51"
 VID_MD5 = "5a6b7c8d9e0f1a2b3c4d5e6f70819a2b"
@@ -65,7 +65,7 @@ def _f_bytes(fn: int, payload: bytes) -> bytes:
 def picture_body(md5hex: str, name: str, elem: int = 2,
                  with_hex_field: bool = True) -> bytes:
     parts = [
-        _f_var(40010, elem),
+        _f_var(45002, elem),
         _f_bytes(45402, name.encode()),
         _f_bytes(45406, bytes.fromhex(md5hex)),
         _f_var(45405, 1199),

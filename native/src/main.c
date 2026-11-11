@@ -144,9 +144,10 @@ static void usage(void)
             "               key = PBKDF2-HMAC-SHA512(pass, salt, %d)\n"
             "  --key        derived 64-hex AES-256 key (skips PBKDF2)\n"
             "  --pics       scan group_msg_table + c2c_msg_table and print\n"
-            "               TSV: table msgid col40011 col40020 elem md5\n"
-            "               filename size (-1 = unknown) for every message\n"
-            "               body carrying an image/video md5\n"
+            "               TSV: table msgid peer sender elem md5 filename\n"
+            "               size (-1 = unknown) for every message body\n"
+            "               carrying a media md5; elem is 45002 (2 = image,\n"
+            "               3 = video/file, 4 = voice)\n"
             "  --locate N   walk the b-tree to the leaf holding msgid N and\n"
             "               report the page's cells (root auto-detected for\n"
             "               group_msg_table; --root overrides)\n"
@@ -225,6 +226,10 @@ static void scan_element(const unsigned char *b, size_t n, struct pic_info *p)
         case 0: /* varint */
             if (varint_at(b, n, &i, &v)) return;
             if (fn == 40010) p->elem = (long long)v;
+            /* Current QQ (9.1.35) puts the element type in 45002: 2 = image,
+             * 3 = video or file, 4 = voice. File messages carry an md5 too,
+             * so the caller needs this to tell pictures from attachments. */
+            else if (fn == 45002) p->elem = (long long)v;
             else if (fn == 45405) p->size = (long long)v;
             break;
         case 1: /* fixed64 */
