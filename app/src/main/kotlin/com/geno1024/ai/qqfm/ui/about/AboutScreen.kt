@@ -36,6 +36,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -51,14 +52,19 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.geno1024.ai.qqfm.BuildConfig
+import com.geno1024.ai.qqfm.data.ConversationIndexer
+import com.geno1024.ai.qqfm.data.MediaRepository
 import com.geno1024.ai.qqfm.data.NtdbProbe
 import com.geno1024.ai.qqfm.data.OcrScanProgress
 import com.geno1024.ai.qqfm.data.OcrScanStatus
 import com.geno1024.ai.qqfm.ocr.formatDuration
 import com.geno1024.ai.qqfm.ui.formatBytes
 import com.geno1024.ai.qqfm.ui.update.UpdatesSection
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * What this app is, which build it is, what it has cleaned up, and the one setting
@@ -120,6 +126,18 @@ fun AboutScreen(
     var probeRunning by remember { mutableStateOf(false) }
     var probeReport by remember { mutableStateOf<String?>(null) }
     val probeScope = rememberCoroutineScope()
+
+    // Building the conversation index reads ~17 GB of pictures and every message
+    // row; the phase comes through a flow so the callback can stay on the worker
+    // thread instead of posting a recomposition per batch.
+    val indexer = remember {
+        ConversationIndexer(context.applicationContext, MediaRepository(context.applicationContext))
+    }
+    val indexPhase = remember { MutableStateFlow<ConversationIndexer.Phase?>(null) }
+    val phase by indexPhase.collectAsState()
+    var indexRunning by remember { mutableStateOf(false) }
+    var indexReport by remember { mutableStateOf<String?>(null) }
+    val indexScope = rememberCoroutineScope()
 
     Scaffold(
         topBar = {
@@ -429,6 +447,47 @@ fun AboutScreen(
                         )
                     }
                 }
+                Button(
+                    onClick = {
+                        indexRunning = true
+                        indexReport = null
+                        indexScope.launch {
+                            val outcome = withContext(Dispatchers.IO) {
+                                indexer.build { phase -> indexPhase.value = phase }
+                            }
+                            indexPhase.value = null
+                            indexRunning = false
+                            indexReport = when (outcome) {
+                                is ConversationIndexer.Outcome.Failed -> "❌ ${outcome.message}"
+                                is ConversationIndexer.Outcome.Done -> {
+                                    val r = outcome.result
+                                    "✅ chatraw ${r.files} 张，算出 md5 ${r.hashed} 张；" +
+                                        "对上消息 ${r.indexed} 张，分布在 ${r.conversations} 个会话"
+                                }
+                            }
+                        }
+                    },
+                    enabled = !indexRunning,
+                ) {
+                    Text(if (indexRunning) "正在建立…" else "建立会话索引")
+                }
+                phase?.let { current ->
+                    Text(
+                        text = phaseLabel(current),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+                indexReport?.let { text ->
+                    SelectionContainer {
+                        Text(
+                            text = text,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                }
             }
 
             HorizontalDivider()
@@ -436,4 +495,18 @@ fun AboutScreen(
             UpdatesSection(modifier = Modifier.padding(bottom = 8.dp))
         }
     }
+}
+
+/** One line describing what the index build is doing, for the debug card. */
+private fun phaseLabel(phase: ConversationIndexer.Phase): String = when (phase) {
+    ConversationIndexer.Phase.Locating -> "正在定位消息数据库…"
+    ConversationIndexer.Phase.Naming -> "正在读取会话名称…"
+    is ConversationIndexer.Phase.Hashing ->
+        if (phase.total == 0) {
+            "正在统计需要校验的图片…"
+        } else {
+            "正在校验图片 md5：${phase.done} / ${phase.total}"
+        }
+    is ConversationIndexer.Phase.ReadingMessages ->
+        "正在读取聊天记录：已扫 ${phase.scanned} 条，命中 ${phase.matched} 张"
 }
