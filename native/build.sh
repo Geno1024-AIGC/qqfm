@@ -10,7 +10,9 @@
 set -e
 cd "$(dirname "$0")"
 
-NDK="${ANDROID_NDK_HOME:-$HOME/Android/Sdk/ndk/29.0.14206865}"
+# CI installs the NDK under ANDROID_HOME (setup-android), a local SDK usually
+# lives under $HOME/Android/Sdk; ANDROID_NDK_HOME wins when set explicitly.
+NDK="${ANDROID_NDK_HOME:-${ANDROID_HOME:-$HOME/Android/Sdk}/ndk/29.0.14206865}"
 HOSTCC="${HOSTCC:-cc}"
 CFLAGS="-O2 -std=gnu11 -Wall -Wextra -Wno-unused-parameter"
 SQLITE_CFLAGS="-O2 -std=gnu11 -w" # third-party: silence its own warnings

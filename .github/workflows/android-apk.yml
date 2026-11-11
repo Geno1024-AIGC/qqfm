@@ -41,12 +41,19 @@ jobs:
       # v3 still defaults to installing "tools platform-tools", and the obsolete
       # `tools` package was removed from the SDK repository, so the default aborts
       # the whole run. Pin the packages we actually need instead.
+      # The NDK is needed for the native nt_msg.db reader built below.
       - uses: android-actions/setup-android@v4
         with:
           cmdline-tools-version: '15859902'
           # Space separated, not a yaml list: the action forwards this straight to
           # sdkmanager as one argument and does not split on newlines.
-          packages: 'platform-tools platforms;android-37.0'
+          packages: 'platform-tools platforms;android-37.0 ndk;29.0.14206865'
+
+      # The reader ships as an arm64 binary in the APK, and its offline fixture
+      # tests must pass before an APK that embeds it is worth assembling.
+      # test.sh builds host + arm64 first, so one step covers both.
+      - name: Build and test native reader
+        run: ./native/test.sh
 
       # A runner has no signing key of its own, and generates a new one on first use.
       # Two builds signed with different keys cannot install over one another, which
