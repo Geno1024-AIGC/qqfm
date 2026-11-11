@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #define NT_KDF_ITER 4000
@@ -66,6 +67,65 @@ static void hex_encode(const unsigned char *in, size_t n, char *out)
     out[n * 2] = '\0';
 }
 
+/*
+ * A live nt_msg.db is still being written by QQ while we read it, so a scan
+ * can occasionally observe a torn page ("database disk image is malformed").
+ * Output is buffered and the whole statement re-run against a freshly opened
+ * handle: a transient failure must neither print half a result set nor print
+ * it twice.
+ */
+typedef struct {
+    char *p;
+    size_t len, cap;
+} nt_buf;
+
+static char *buf_reserve(nt_buf *b, size_t n) /* room for n bytes + NUL */
+{
+    if (b->len + n + 1 > b->cap) {
+        size_t cap = b->cap ? b->cap : 8192;
+        char *p;
+        while (cap < b->len + n + 1) cap *= 2;
+        p = realloc(b->p, cap);
+        if (!p) return NULL;
+        b->p = p;
+        b->cap = cap;
+    }
+    return b->p + b->len;
+}
+
+static int buf_add(nt_buf *b, const char *fmt, ...)
+{
+    va_list ap;
+    int n;
+    char *dst;
+
+    va_start(ap, fmt);
+    n = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    if (n < 0) return -1;
+    dst = buf_reserve(b, (size_t)n);
+    if (!dst) return -1;
+    va_start(ap, fmt);
+    vsnprintf(dst, (size_t)n + 1, fmt, ap);
+    va_end(ap);
+    b->len += (size_t)n;
+    return 0;
+}
+
+/* Errors worth another attempt: the file changed underneath a read. */
+static int transient(int rc)
+{
+    switch (rc & 0xff) {
+    case SQLITE_CORRUPT:
+    case SQLITE_IOERR:
+    case SQLITE_BUSY:
+    case SQLITE_LOCKED:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 static void usage(void)
 {
     fprintf(stderr,
@@ -81,29 +141,35 @@ static void usage(void)
             NT_KDF_ITER);
 }
 
-/* Prints sqlite_master tables plus the WAL merge summary. */
-static int report(sqlite3 *db)
+/* Prints sqlite_master tables plus the WAL merge summary, into out. */
+static int report(sqlite3 *db, nt_buf *out, char *emsg, size_t emsglen)
 {
     sqlite3_stmt *st;
     unsigned int frames = 0;
     int mode = 0;
     sqlite3_int64 wpages = 0;
-    int rc;
+    int rc, s;
 
     rc = sqlite3_prepare_v2(db, "PRAGMA page_count;", -1, &st, NULL);
-    if (rc == SQLITE_OK && sqlite3_step(st) == SQLITE_ROW)
-        printf("page_count=%lld\n", (long long)sqlite3_column_int64(st, 0));
+    if (rc == SQLITE_OK) {
+        s = sqlite3_step(st);
+        if (s == SQLITE_ROW)
+            buf_add(out, "page_count=%lld\n",
+                    (long long)sqlite3_column_int64(st, 0));
+        else
+            rc = s;
+    }
     if (st) sqlite3_finalize(st);
     if (rc != SQLITE_OK) {
-        fprintf(stderr, "ntdbread: page_count failed: %s\n", sqlite3_errmsg(db));
-        return 1;
+        snprintf(emsg, emsglen, "page_count failed: %s", sqlite3_errmsg(db));
+        return rc;
     }
 
     /* page_count already touched xFileSize, which runs the WAL scan. */
     nt_vfs_wal_stats(&frames, &mode, &wpages);
-    printf("wal_mode=%s wal_frames=%u wal_pages=%lld wal_plain=%d\n",
-           mode == 0 ? "none" : mode == 1 ? "raw" : "dec",
-           frames, (long long)wpages, nt_vfs_wal_is_plain());
+    buf_add(out, "wal_mode=%s wal_frames=%u wal_pages=%lld wal_plain=%d\n",
+            mode == 0 ? "none" : mode == 1 ? "raw" : "dec",
+            frames, (long long)wpages, nt_vfs_wal_is_plain());
 
     rc = sqlite3_prepare_v2(
         db,
@@ -111,62 +177,78 @@ static int report(sqlite3 *db)
         "ORDER BY rootpage;",
         -1, &st, NULL);
     if (rc != SQLITE_OK) {
-        fprintf(stderr, "ntdbread: sqlite_master failed: %s\n", sqlite3_errmsg(db));
-        return 1;
+        snprintf(emsg, emsglen, "sqlite_master failed: %s", sqlite3_errmsg(db));
+        return rc;
     }
-    while (sqlite3_step(st) == SQLITE_ROW)
-        printf("table %s %lld\n", sqlite3_column_text(st, 1)
-                   ? (const char *)sqlite3_column_text(st, 1) : "?",
-               (long long)sqlite3_column_int64(st, 0));
+    while ((s = sqlite3_step(st)) == SQLITE_ROW)
+        buf_add(out, "table %s %lld\n",
+                sqlite3_column_text(st, 1)
+                    ? (const char *)sqlite3_column_text(st, 1)
+                    : "?",
+                (long long)sqlite3_column_int64(st, 0));
+    if (s != SQLITE_DONE)
+        snprintf(emsg, emsglen, "sqlite_master failed: %s", sqlite3_errmsg(db));
     sqlite3_finalize(st);
+    if (s != SQLITE_DONE) {
+        return s;
+    }
 
     rc = sqlite3_prepare_v2(db,
                             "SELECT count(*) FROM sqlite_master "
                             "WHERE type!='table';",
                             -1, &st, NULL);
-    if (rc == SQLITE_OK && sqlite3_step(st) == SQLITE_ROW)
-        printf("master_other=%d\n", sqlite3_column_int(st, 0));
+    if (rc == SQLITE_OK) {
+        s = sqlite3_step(st);
+        if (s == SQLITE_ROW)
+            buf_add(out, "master_other=%d\n", sqlite3_column_int(st, 0));
+        else
+            rc = s;
+    }
     if (st) sqlite3_finalize(st);
-    return 0;
+    if (rc != SQLITE_OK) {
+        snprintf(emsg, emsglen, "master_other failed: %s", sqlite3_errmsg(db));
+        return rc;
+    }
+    return SQLITE_OK;
 }
 
-/* Runs one statement, TSV on stdout. */
-static int run_sql(sqlite3 *db, const char *sql)
+/* Runs one statement, TSV into out. Returns SQLITE_OK or the failing code. */
+static int run_sql(sqlite3 *db, const char *sql, nt_buf *out,
+                   char *emsg, size_t emsglen, int *prows)
 {
     sqlite3_stmt *st = NULL;
     int rc, ncol, i, rows = 0;
 
     rc = sqlite3_prepare_v2(db, sql, -1, &st, NULL);
     if (rc != SQLITE_OK) {
-        fprintf(stderr, "ntdbread: prepare failed: %s\n", sqlite3_errmsg(db));
-        return 1;
+        snprintf(emsg, emsglen, "prepare failed: %s", sqlite3_errmsg(db));
+        return rc;
     }
     ncol = sqlite3_column_count(st);
     for (i = 0; i < ncol; i++) {
         const char *name = sqlite3_column_name(st, i);
-        printf("%s%s", i ? "\t" : "", name ? name : "");
+        buf_add(out, "%s%s", i ? "\t" : "", name ? name : "");
     }
-    printf("\n");
+    buf_add(out, "\n");
 
     while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
         for (i = 0; i < ncol; i++) {
             int type = sqlite3_column_type(st, i);
-            if (i) putchar('\t');
+            if (i) buf_add(out, "\t");
             if (type == SQLITE_NULL) {
                 /* nothing */
             } else if (type == SQLITE_BLOB) {
                 const unsigned char *blob = sqlite3_column_blob(st, i);
                 int n = sqlite3_column_bytes(st, i);
-                char *hexx = malloc((size_t)n * 2 + 1);
+                char *hexx = buf_reserve(out, (size_t)n * 2);
                 if (hexx) {
                     hex_encode(blob, (size_t)n, hexx);
-                    fputs(hexx, stdout);
-                    free(hexx);
+                    out->len += (size_t)n * 2;
                 }
             } else if (type == SQLITE_INTEGER) {
-                printf("%lld", (long long)sqlite3_column_int64(st, i));
+                buf_add(out, "%lld", (long long)sqlite3_column_int64(st, i));
             } else if (type == SQLITE_FLOAT) {
-                printf("%g", sqlite3_column_double(st, i));
+                buf_add(out, "%g", sqlite3_column_double(st, i));
             } else {
                 const unsigned char *text = sqlite3_column_text(st, i);
                 int n = sqlite3_column_bytes(st, i);
@@ -175,20 +257,22 @@ static int run_sql(sqlite3 *db, const char *sql)
                     char c = (char)text[j];
                     /* keep the row on one line */
                     if (c == '\t' || c == '\n' || c == '\r') c = ' ';
-                    putchar(c);
+                    buf_add(out, "%c", c);
                 }
             }
         }
-        putchar('\n');
+        buf_add(out, "\n");
         rows++;
     }
+    if (rc == SQLITE_DONE) rc = SQLITE_OK; /* finished normally */
+    if (rc != SQLITE_OK)
+        snprintf(emsg, emsglen, "step failed: %s", sqlite3_errmsg(db));
     sqlite3_finalize(st);
-    if (rc != SQLITE_DONE) {
-        fprintf(stderr, "ntdbread: step failed: %s\n", sqlite3_errmsg(db));
-        return 1;
+    if (rc != SQLITE_OK) {
+        return rc;
     }
-    fprintf(stderr, "ntdbread: rows=%d\n", rows);
-    return 0;
+    if (prows) *prows = rows;
+    return SQLITE_OK;
 }
 
 int main(int argc, char **argv)
@@ -200,7 +284,7 @@ int main(int argc, char **argv)
     unsigned char key[32];
     sqlite3 *db = NULL;
     int no_wal = 0, kat_only = 0;
-    int i, rc, exitcode = 0;
+    int i, rc;
 
     for (i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -272,35 +356,75 @@ int main(int argc, char **argv)
     nt_vfs_set_no_wal(no_wal);
     if (nt_vfs_register() != SQLITE_OK) die("cannot register the VFS");
 
-    rc = sqlite3_open_v2(dbpath, &db, SQLITE_OPEN_READONLY, NULL);
-    if (rc != SQLITE_OK) {
-        fprintf(stderr, "ntdbread: open failed (%d): %s\n", rc,
-                db ? sqlite3_errmsg(db) : "out of memory");
-        {
-            unsigned char page[4096];
-            if (nt_vfs_read_header_page(dbpath, page)) {
-                fprintf(stderr,
-                        "ntdbread: page 1 *does* decrypt (page=%u ver=%u/%u "
-                        "enc=%u) — failure is structural, not cryptographic\n",
-                        ((unsigned)page[16] << 8) | page[17], page[18], page[19],
-                        ((unsigned)page[56] << 24) | ((unsigned)page[57] << 16) |
-                            ((unsigned)page[58] << 8) | page[59]);
-            } else {
-                fprintf(stderr,
-                        "ntdbread: page 1 does not decrypt to a plausible "
-                        "header — wrong key or geometry\n");
+    {
+        nt_buf out = {NULL, 0, 0};
+        char emsg[256] = "";
+        int attempt, rows = 0, open_failed = 0;
+
+        rc = SQLITE_ERROR;
+        for (attempt = 0; attempt < 3; attempt++) {
+            if (attempt) {
+                /* QQ may be mid-write; give it a moment, then take a new
+                 * snapshot with freshly opened files. */
+                struct timespec ts;
+                ts.tv_sec = 0;
+                ts.tv_nsec = 300000000L * attempt;
+                nanosleep(&ts, NULL);
+                fprintf(stderr, "ntdbread: transient failure (%s), retrying\n",
+                        emsg);
             }
+            out.len = 0; /* discard any partial rows from a torn read */
+            open_failed = 0;
+            rc = sqlite3_open_v2(dbpath, &db, SQLITE_OPEN_READONLY, NULL);
+            if (rc != SQLITE_OK) {
+                open_failed = 1;
+                snprintf(emsg, sizeof(emsg), "open failed (%d): %s", rc,
+                         db ? sqlite3_errmsg(db) : "out of memory");
+                if (db) {
+                    sqlite3_close(db);
+                    db = NULL;
+                }
+            } else {
+                /* No spill to disk: temp files would only add writes. */
+                sqlite3_exec(db, "PRAGMA temp_store=MEMORY;", NULL, NULL, NULL);
+                rc = sql ? run_sql(db, sql, &out, emsg, sizeof(emsg), &rows)
+                         : report(db, &out, emsg, sizeof(emsg));
+                if (rc == SQLITE_OK) break;
+                sqlite3_close(db);
+                db = NULL;
+            }
+            if (!transient(rc)) break;
         }
+
+        if (rc != SQLITE_OK) {
+            fprintf(stderr, "ntdbread: %s\n", emsg);
+            if (open_failed) {
+                unsigned char page[4096];
+                if (nt_vfs_read_header_page(dbpath, page)) {
+                    fprintf(stderr,
+                            "ntdbread: page 1 *does* decrypt (page=%u ver=%u/%u "
+                            "enc=%u) — failure is structural, not "
+                            "cryptographic\n",
+                            ((unsigned)page[16] << 8) | page[17], page[18],
+                            page[19],
+                            ((unsigned)page[56] << 24) |
+                                ((unsigned)page[57] << 16) |
+                                ((unsigned)page[58] << 8) | page[59]);
+                } else {
+                    fprintf(stderr,
+                            "ntdbread: page 1 does not decrypt to a plausible "
+                            "header — wrong key or geometry\n");
+                }
+            }
+            free(out.p);
+            if (db) sqlite3_close(db);
+            return 1;
+        }
+
+        fwrite(out.p, 1, out.len, stdout);
+        free(out.p);
+        if (sql) fprintf(stderr, "ntdbread: rows=%d\n", rows);
         sqlite3_close(db);
-        return 1;
+        return 0;
     }
-
-    /* No spill to disk: temp files would only add writes to prove nothing. */
-    sqlite3_exec(db, "PRAGMA temp_store=MEMORY;", NULL, NULL, NULL);
-
-    if (sql) exitcode = run_sql(db, sql);
-    else exitcode = report(db);
-
-    sqlite3_close(db);
-    return exitcode;
 }
