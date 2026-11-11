@@ -129,12 +129,12 @@ def build_plain(path: str) -> None:
         run(
             'CREATE TABLE group_msg_table('
             '"40001" INTEGER PRIMARY KEY, "40011" INTEGER, '
-            '"40020" TEXT, "40800" BLOB)'
+            '"40020" TEXT, "40021" TEXT, "40800" BLOB)'
         )
         run(
             'CREATE TABLE c2c_msg_table('
             '"40001" INTEGER PRIMARY KEY, "40011" INTEGER, '
-            '"40020" TEXT, "40800" BLOB)'
+            '"40020" TEXT, "40021" TEXT, "40800" BLOB)'
         )
         run(
             "INSERT INTO sessions(name, kind) VALUES "
@@ -158,7 +158,7 @@ def build_plain(path: str) -> None:
 
         def insert_msgs(table: str, rows) -> None:
             values = ",".join(
-                "(%d, %d, %s, x'%s')"
+                "(%d, %d, 'u_SENDER', %s, x'%s')"
                 % (msgid, elem, "NULL" if peer is None else f"'{peer}'",
                    body.hex())
                 for msgid, elem, peer, body in rows
@@ -166,11 +166,11 @@ def build_plain(path: str) -> None:
             run(f"INSERT INTO {table} VALUES {values}")
 
         insert_msgs("group_msg_table", [
-            (1001, 2, "u_TESTPEER",
+            (1001, 2, "761140305",
              picture_body(IMG_MD5, IMG_MD5.upper() + ".png")),
             (1002, 5, None, text_body()),
             # video: no f45424 — exercises the raw f45406 fallback
-            (1003, 3, None,
+            (1003, 3, "761140305",
              picture_body(VID_MD5, VID_MD5.upper() + ".mp4",
                           elem=3, with_hex_field=False)),
         ])

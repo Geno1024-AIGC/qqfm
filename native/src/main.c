@@ -444,6 +444,7 @@ static int run_sql(sqlite3 *db, const char *sql, nt_buf *out,
 struct pics_run {
     int table;             /* index into pics_tables */
     int tstate[2];         /* 0 unchecked, 1 absent, 2 present */
+    int header;            /* TSV header already written to out */
     long long last;        /* resume point: emit rows with msgid > last */
     int rows, matches;
 };
@@ -461,14 +462,31 @@ static int pics_chunk(void)
     return (n > 0 && n <= 1000000) ? n : PICS_CHUNK;
 }
 
+/* Append a TEXT column as one TSV field; tabs/newlines would break the record. */
+static void buf_add_text(sqlite3_stmt *q, int i, nt_buf *out)
+{
+    const unsigned char *text;
+    int tn, j;
+
+    if (sqlite3_column_type(q, i) == SQLITE_NULL) return;
+    text = sqlite3_column_text(q, i);
+    tn = sqlite3_column_bytes(q, i);
+    for (j = 0; j < tn; j++) {
+        char c = (char)text[j];
+        if (c == '\t' || c == '\n' || c == '\r') c = ' ';
+        buf_add(out, "%c", c);
+    }
+}
 static int run_pics_resume(sqlite3 *db, struct pics_run *st, nt_buf *out,
                            char *emsg, size_t emsglen)
 {
     char sql[256];
 
-    if (out->len == 0)
-        buf_add(out, "table\tmsgid\tcol40011\tcol40020\telem\tmd5\tfilename"
+    if (!st->header) {
+        buf_add(out, "table\tmsgid\tpeer\tsender\telem\tmd5\tfilename"
                      "\tsize\n");
+        st->header = 1;
+    }
 
     while (st->table < PICS_TABLES) {
         const char *table = pics_tables[st->table];
@@ -497,7 +515,7 @@ static int run_pics_resume(sqlite3 *db, struct pics_run *st, nt_buf *out,
 
         /* "40001" is the rowid-aliased primary key, so this seeks. */
         snprintf(sql, sizeof(sql),
-                 "SELECT \"40001\", \"40011\", \"40020\", \"40800\" "
+                 "SELECT \"40001\", \"40021\", \"40020\", \"40800\" "
                  "FROM \"%s\" WHERE \"40001\" > ? "
                  "ORDER BY \"40001\" LIMIT %d",
                  table, chunk);
@@ -525,18 +543,9 @@ static int run_pics_resume(sqlite3 *db, struct pics_run *st, nt_buf *out,
             st->matches++;
 
             buf_add(out, "%s\t%lld\t", table, st->last);
-            if (sqlite3_column_type(q, 1) != SQLITE_NULL)
-                buf_add(out, "%lld", (long long)sqlite3_column_int64(q, 1));
+            buf_add_text(q, 1, out);
             buf_add(out, "\t");
-            if (sqlite3_column_type(q, 2) != SQLITE_NULL) {
-                const unsigned char *text = sqlite3_column_text(q, 2);
-                int tn = sqlite3_column_bytes(q, 2), j;
-                for (j = 0; j < tn; j++) {
-                    char c = (char)text[j];
-                    if (c == '\t' || c == '\n' || c == '\r') c = ' ';
-                    buf_add(out, "%c", c);
-                }
-            }
+            buf_add_text(q, 2, out);
             buf_add(out, "\t%lld\t%s\t%s\t%lld\n", p.elem, p.md5, p.name,
                     p.size);
         }
