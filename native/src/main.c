@@ -129,16 +129,164 @@ static int transient(int rc)
 static void usage(void)
 {
     fprintf(stderr,
-            "usage: ntdbread [--no-wal] [--kat] (--key HEX64 | --md5key HEX32) "
-            "<nt_msg.db> [SQL]\n"
+            "usage: ntdbread [--no-wal] [--kat] [--pics] "
+            "(--key HEX64 | --md5key HEX32) <nt_msg.db> [SQL]\n"
             "  --kat        run crypto known-answer tests and exit\n"
             "  --no-wal     ignore -wal frames (main file only)\n"
             "  --md5key     md5(prefix+rand); salt is read from byte 1024,\n"
             "               key = PBKDF2-HMAC-SHA512(pass, salt, %d)\n"
             "  --key        derived 64-hex AES-256 key (skips PBKDF2)\n"
+            "  --pics       scan group_msg_table + c2c_msg_table and print\n"
+            "               TSV: table msgid col40011 col40020 elem md5\n"
+            "               filename size (-1 = unknown) for every message\n"
+            "               body carrying an image/video md5\n"
             "  SQL          one statement; results printed as TSV with a\n"
             "               header line of column names\n",
             NT_KDF_ITER);
+}
+
+/* ---- message-body extraction (fields verified on a live QQ 9.1.35 db) ---- */
+
+/*
+ * 40800 = one outer length-delimited field 40800 wrapping the element list.
+ * A picture element carries f40010 (element type), f45402 (file name =
+ * md5 + extension), f45406 (raw 16-byte md5), f45405 (byte size) and
+ * f45424 (md5 as 32 hex chars — authoritative when present). Text messages
+ * carry none of these, which is what keeps hex-looking authkeys out.
+ */
+struct pic_info {
+    char md5[33];
+    char name[96];
+    long long size; /* f45405 */
+    long long elem; /* f40010 */
+    int have;
+};
+
+static int varint_at(const unsigned char *b, size_t n, size_t *i,
+                     unsigned long long *v)
+{
+    unsigned long long x = 0;
+    int shift = 0;
+    while (*i < n) {
+        unsigned char c = b[(*i)++];
+        x |= (unsigned long long)(c & 0x7f) << shift;
+        if (!(c & 0x80)) {
+            *v = x;
+            return 0;
+        }
+        shift += 7;
+        if (shift > 63) return -1;
+    }
+    return -1;
+}
+
+static int is_hex(const unsigned char *b, size_t n)
+{
+    size_t k;
+    for (k = 0; k < n; k++) {
+        int c = b[k];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+              || (c >= 'A' && c <= 'F')))
+            return 0;
+    }
+    return 1;
+}
+
+static void lower_copy(char *dst, const unsigned char *src, size_t n)
+{
+    size_t k;
+    for (k = 0; k < n; k++) {
+        char c = (char)src[k];
+        if (c >= 'A' && c <= 'F') c += 32;
+        dst[k] = c;
+    }
+    dst[n] = '\0';
+}
+
+static void scan_element(const unsigned char *b, size_t n, struct pic_info *p)
+{
+    size_t i = 0, k;
+    unsigned long long tag, fn, v;
+
+    while (i < n && varint_at(b, n, &i, &tag) == 0) {
+        fn = tag >> 3;
+        switch (tag & 7) {
+        case 0: /* varint */
+            if (varint_at(b, n, &i, &v)) return;
+            if (fn == 40010) p->elem = (long long)v;
+            else if (fn == 45405) p->size = (long long)v;
+            break;
+        case 1: /* fixed64 */
+            if (i + 8 > n) return;
+            i += 8;
+            break;
+        case 2: { /* length-delimited */
+            unsigned long long len;
+            const unsigned char *val;
+            if (varint_at(b, n, &i, &len) || len > n - i) return;
+            val = b + i;
+            i += (size_t)len;
+            if (fn == 45424 && len == 32 && is_hex(val, 32)) {
+                lower_copy(p->md5, val, 32);
+                p->have = 1;
+            } else if (fn == 45406 && len == 16 && !p->have) {
+                hex_encode(val, 16, p->md5);
+                p->have = 1;
+            } else if (fn == 45402 && len && len < sizeof(p->name)) {
+                for (k = 0; k < len; k++) {
+                    unsigned char c = val[k];
+                    p->name[k] = (c >= 0x20 && c < 0x7f) ? (char)c : '?';
+                }
+                p->name[len] = '\0';
+            }
+            break;
+        }
+        case 5: /* fixed32 */
+            if (i + 4 > n) return;
+            i += 4;
+            break;
+        default:
+            return; /* not protobuf — stop rather than wander off */
+        }
+    }
+}
+
+/* Returns 1 when the body yielded an md5. */
+static int scan_blob(const unsigned char *b, size_t n, struct pic_info *p)
+{
+    size_t i = 0;
+    int inner = 0;
+    unsigned long long tag, fn;
+
+    memset(p, 0, sizeof(*p));
+    p->elem = -1;
+    p->size = -1;
+
+    while (i < n && varint_at(b, n, &i, &tag) == 0) {
+        fn = tag >> 3;
+        if ((tag & 7) == 2) {
+            unsigned long long len;
+            if (varint_at(b, n, &i, &len) || len > n - i) return 0;
+            if (fn == 40800) {
+                scan_element(b + i, (size_t)len, p);
+                inner = 1;
+            }
+            i += (size_t)len;
+        } else if ((tag & 7) == 0) {
+            unsigned long long v;
+            if (varint_at(b, n, &i, &v)) return 0;
+        } else if ((tag & 7) == 1) {
+            if (i + 8 > n) return 0;
+            i += 8;
+        } else if ((tag & 7) == 5) {
+            if (i + 4 > n) return 0;
+            i += 4;
+        } else {
+            return 0;
+        }
+    }
+    if (!inner) scan_element(b, n, p); /* already an element list */
+    return p->have;
 }
 
 /* Prints sqlite_master tables plus the WAL merge summary, into out. */
@@ -275,6 +423,101 @@ static int run_sql(sqlite3 *db, const char *sql, nt_buf *out,
     return SQLITE_OK;
 }
 
+/*
+ * Streams one message table, keeping only bodies that carry an md5. Missing
+ * tables are skipped (not every nt_msg.db has both), missing columns fail the
+ * query like anywhere else.
+ */
+static int run_pics(sqlite3 *db, const char *table, nt_buf *out,
+                    char *emsg, size_t emsglen, int *prows, int *pmatches)
+{
+    static const char *sqlfmt =
+        "SELECT \"40001\", \"40011\", \"40020\", \"40800\" FROM \"%s\"";
+    sqlite3_stmt *st = NULL, *chk = NULL;
+    char sql[192];
+    int rc, rows = 0, matches = 0;
+
+    *prows = 0;
+    *pmatches = 0;
+
+    rc = sqlite3_prepare_v2(db,
+                            "SELECT 1 FROM sqlite_master WHERE type='table' "
+                            "AND name=?;",
+                            -1, &chk, NULL);
+    if (rc == SQLITE_OK) {
+        int found;
+        sqlite3_bind_text(chk, 1, table, -1, SQLITE_STATIC);
+        found = sqlite3_step(chk) == SQLITE_ROW;
+        sqlite3_finalize(chk);
+        if (!found) return SQLITE_OK;
+    }
+
+    snprintf(sql, sizeof(sql), sqlfmt, table);
+    rc = sqlite3_prepare_v2(db, sql, -1, &st, NULL);
+    if (rc != SQLITE_OK) {
+        snprintf(emsg, emsglen, "%s: prepare failed: %s", table,
+                 sqlite3_errmsg(db));
+        return rc;
+    }
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+        struct pic_info p;
+        const unsigned char *blob = sqlite3_column_blob(st, 3);
+        int n = sqlite3_column_bytes(st, 3);
+
+        rows++;
+        if (!blob || n <= 0) continue;
+        if (!scan_blob(blob, (size_t)n, &p)) continue;
+        matches++;
+
+        buf_add(out, "%s\t%lld\t", table,
+                (long long)sqlite3_column_int64(st, 0));
+        if (sqlite3_column_type(st, 1) != SQLITE_NULL)
+            buf_add(out, "%lld", (long long)sqlite3_column_int64(st, 1));
+        buf_add(out, "\t");
+        if (sqlite3_column_type(st, 2) != SQLITE_NULL) {
+            const unsigned char *text = sqlite3_column_text(st, 2);
+            int tn = sqlite3_column_bytes(st, 2), j;
+            for (j = 0; j < tn; j++) {
+                char c = (char)text[j];
+                if (c == '\t' || c == '\n' || c == '\r') c = ' ';
+                buf_add(out, "%c", c);
+            }
+        }
+        buf_add(out, "\t%lld\t%s\t%s\t%lld\n", p.elem, p.md5, p.name, p.size);
+    }
+    if (rc == SQLITE_DONE) rc = SQLITE_OK;
+    if (rc != SQLITE_OK)
+        snprintf(emsg, emsglen, "%s: step failed: %s", table,
+                 sqlite3_errmsg(db));
+    sqlite3_finalize(st);
+    if (rc == SQLITE_OK) {
+        *prows = rows;
+        *pmatches = matches;
+    }
+    return rc;
+}
+
+static int run_pics_all(sqlite3 *db, nt_buf *out, char *emsg, size_t emsglen,
+                        int *prows, int *pmatches)
+{
+    static const char *tables[] = {"group_msg_table", "c2c_msg_table"};
+    size_t i;
+    int rc;
+
+    buf_add(out, "table\tmsgid\tcol40011\tcol40020\telem\tmd5\tfilename"
+                 "\tsize\n");
+    *prows = 0;
+    *pmatches = 0;
+    for (i = 0; i < sizeof(tables) / sizeof(tables[0]); i++) {
+        int rows = 0, matches = 0;
+        rc = run_pics(db, tables[i], out, emsg, emsglen, &rows, &matches);
+        *prows += rows;
+        *pmatches += matches;
+        if (rc != SQLITE_OK) return rc;
+    }
+    return SQLITE_OK;
+}
+
 int main(int argc, char **argv)
 {
     const char *dbpath = NULL;
@@ -283,7 +526,7 @@ int main(int argc, char **argv)
     const char *md5hex = NULL;
     unsigned char key[32];
     sqlite3 *db = NULL;
-    int no_wal = 0, kat_only = 0;
+    int no_wal = 0, kat_only = 0, pics = 0;
     int i, rc;
 
     for (i = 1; i < argc; i++) {
@@ -292,6 +535,8 @@ int main(int argc, char **argv)
             kat_only = 1;
         } else if (strcmp(a, "--no-wal") == 0) {
             no_wal = 1;
+        } else if (strcmp(a, "--pics") == 0) {
+            pics = 1;
         } else if (strcmp(a, "--key") == 0) {
             if (++i >= argc) die("--key needs a value");
             keyhex = argv[i];
@@ -325,6 +570,7 @@ int main(int argc, char **argv)
         usage();
         return 2;
     }
+    if (pics && sql) die("--pics does not take a SQL statement");
 
     if (keyhex) {
         if (hex_decode(keyhex, key, 32)) die("--key must be 64 hex characters");
@@ -359,7 +605,7 @@ int main(int argc, char **argv)
     {
         nt_buf out = {NULL, 0, 0};
         char emsg[256] = "";
-        int attempt, rows = 0, open_failed = 0;
+        int attempt, rows = 0, matches = 0, open_failed = 0;
 
         rc = SQLITE_ERROR;
         for (attempt = 0; attempt < 3; attempt++) {
@@ -374,6 +620,8 @@ int main(int argc, char **argv)
                         emsg);
             }
             out.len = 0; /* discard any partial rows from a torn read */
+            rows = 0;
+            matches = 0;
             open_failed = 0;
             rc = sqlite3_open_v2(dbpath, &db, SQLITE_OPEN_READONLY, NULL);
             if (rc != SQLITE_OK) {
@@ -387,8 +635,13 @@ int main(int argc, char **argv)
             } else {
                 /* No spill to disk: temp files would only add writes. */
                 sqlite3_exec(db, "PRAGMA temp_store=MEMORY;", NULL, NULL, NULL);
-                rc = sql ? run_sql(db, sql, &out, emsg, sizeof(emsg), &rows)
-                         : report(db, &out, emsg, sizeof(emsg));
+                if (pics)
+                    rc = run_pics_all(db, &out, emsg, sizeof(emsg), &rows,
+                                      &matches);
+                else if (sql)
+                    rc = run_sql(db, sql, &out, emsg, sizeof(emsg), &rows);
+                else
+                    rc = report(db, &out, emsg, sizeof(emsg));
                 if (rc == SQLITE_OK) break;
                 sqlite3_close(db);
                 db = NULL;
@@ -423,7 +676,10 @@ int main(int argc, char **argv)
 
         fwrite(out.p, 1, out.len, stdout);
         free(out.p);
-        if (sql) fprintf(stderr, "ntdbread: rows=%d\n", rows);
+        if (pics)
+            fprintf(stderr, "ntdbread: scanned=%d media=%d\n", rows, matches);
+        else if (sql)
+            fprintf(stderr, "ntdbread: rows=%d\n", rows);
         sqlite3_close(db);
         return 0;
     }

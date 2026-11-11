@@ -34,6 +34,59 @@ RESERVE = 48
 CIPHER_END = PAGE - RESERVE  # 4048
 HEADER = 1024
 
+# Message-body fixtures, mirroring the structure parsed from the live device:
+# outer f40800 → element with f40010 (type), f45402 (name), f45406 (raw md5),
+# f45405 (size), f45424 (md5 as hex). The text body carries hex-looking noise
+# in fields the extractor must ignore.
+IMG_MD5 = "28e13060375d9b8e2f95960f578e6eae"
+IMG2_MD5 = "0f4b1c7a9d3e5268b0ac41d7e93f2a51"
+VID_MD5 = "5a6b7c8d9e0f1a2b3c4d5e6f70819a2b"
+NOISE_MD5 = "0123456789abcdef0123456789abcdef"  # must never be extracted
+
+
+def _varint(v: int) -> bytes:
+    out = bytearray()
+    while True:
+        b = v & 0x7F
+        v >>= 7
+        out.append(b | 0x80 if v else b)
+        if not v:
+            return bytes(out)
+
+
+def _f_var(fn: int, v: int) -> bytes:
+    return _varint((fn << 3) | 0) + _varint(v)
+
+
+def _f_bytes(fn: int, payload: bytes) -> bytes:
+    return _varint((fn << 3) | 2) + _varint(len(payload)) + payload
+
+
+def picture_body(md5hex: str, name: str, elem: int = 2,
+                 with_hex_field: bool = True) -> bytes:
+    parts = [
+        _f_var(40010, elem),
+        _f_bytes(45402, name.encode()),
+        _f_bytes(45406, bytes.fromhex(md5hex)),
+        _f_var(45405, 1199),
+    ]
+    if with_hex_field:
+        parts.append(_f_bytes(45424, md5hex.upper().encode()))
+    # nested noise: a 32-hex string in a field the extractor must not read
+    parts.append(_f_bytes(45600, _f_bytes(1, b"x" * 10)))
+    return _f_bytes(40800, b"".join(parts))
+
+
+def text_body() -> bytes:
+    inner = _f_var(40010, 5)
+    inner += _f_var(45001, 7706770972790875328)
+    # rich text whose payload contains an md5-shaped string: must be ignored
+    inner += _f_bytes(48214, ("<gtip><nor txt=\"noise " + NOISE_MD5
+                              + "\"></nor></gtip>").encode())
+    # …and a bare 32-hex blob in an unknown field, likewise
+    inner += _f_bytes(45403, NOISE_MD5.encode())
+    return _f_bytes(40800, inner)
+
 
 def pkcs_pad_free_encrypt(data: bytes, key: bytes, iv: bytes) -> bytes:
     # AES-256-CBC without padding (lengths are block multiples here).
@@ -74,6 +127,16 @@ def build_plain(path: str) -> None:
             "md5 TEXT, body TEXT)"
         )
         run(
+            'CREATE TABLE group_msg_table('
+            '"40001" INTEGER PRIMARY KEY, "40011" INTEGER, '
+            '"40020" TEXT, "40800" BLOB)'
+        )
+        run(
+            'CREATE TABLE c2c_msg_table('
+            '"40001" INTEGER PRIMARY KEY, "40011" INTEGER, '
+            '"40020" TEXT, "40800" BLOB)'
+        )
+        run(
             "INSERT INTO sessions(name, kind) VALUES "
             + ",".join(
                 f"('会话-{i} {'群' if i % 2 else '私聊'}', {i % 3})"
@@ -92,6 +155,29 @@ def build_plain(path: str) -> None:
             "INSERT INTO blobs(payload) VALUES "
             + ",".join(f"(x'{os.urandom(512).hex()}')" for _ in range(100))
         )
+
+        def insert_msgs(table: str, rows) -> None:
+            values = ",".join(
+                "(%d, %d, %s, x'%s')"
+                % (msgid, elem, "NULL" if peer is None else f"'{peer}'",
+                   body.hex())
+                for msgid, elem, peer, body in rows
+            )
+            run(f"INSERT INTO {table} VALUES {values}")
+
+        insert_msgs("group_msg_table", [
+            (1001, 2, "u_TESTPEER",
+             picture_body(IMG_MD5, IMG_MD5.upper() + ".png")),
+            (1002, 5, None, text_body()),
+            # video: no f45424 — exercises the raw f45406 fallback
+            (1003, 3, None,
+             picture_body(VID_MD5, VID_MD5.upper() + ".mp4",
+                          elem=3, with_hex_field=False)),
+        ])
+        insert_msgs("c2c_msg_table", [
+            (2001, 2, "u_C2CPEER",
+             picture_body(IMG2_MD5, IMG2_MD5.upper() + ".png")),
+        ])
         run("VACUUM")
     finally:
         lib.sqlite3_close(db)
