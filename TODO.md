@@ -71,10 +71,16 @@ hex 的最后 3 个字符                                桶目录名
     命名空间不同时自动 `nsenter -t 1 -m -- sh -c` 执行（glob 必须在目标命名空间内展开）。
   - 待解小疑点：解密出的头 `byte20=80`（SQLite 视角 usable=4016）与 crypto IV 位置
     （4048 → reserve 48）不一致——记录解析时按实测定 usable，不阻塞。
-- **Phase 1（下一步）**：NDK + `sqlite3.c` + 1024 偏移 VFS，native 工具由 `su` 跑，
-  全量扫 `40800` 抽图片 md5 → 会话映射；NDK 未装（`dl.google.com` 可达）。
-- **Phase 1 注意**：库是 WAL（-wal 3.7 MB），`-wal` 要一起读；WAL 中的页同样要解密；
-  shortvideo 的文件名规则未验证（图片的 crc64 规则已确定）。
+- **Phase 1 真机通过（2026-11-11）**：`ntdbread --md5key` 在真机 `su` 下直接跑通——
+  `page_count=3875332`、**34 张表全解**（与 Phase 0 一致）、
+  `wal_mode=raw wal_frames=80 wal_pages=3875332 wal_plain=0`
+  → 真实 QQ `-wal` 被成功合并：80 帧有效、校验和对存储字节（mode raw）、
+  投票判定为**密文帧**（QQ 加密了 WAL，非明文）。`master_other=72` 为索引/视图，正常。
+- **Phase 1 已完成**：NDK + `sqlite3.c` 3.54.1 + 1024 偏移解密 VFS（native/，只读），
+  离线 fixture 测试含三种 WAL 口味（plain / enc-raw / enc-dec）全绿，CI 已加 NDK 构建步骤；
+  下一步 Kotlin 接线（assets 打包 → `su` 执行 → 解析 → md5→会话映射）与
+  全量扫 `40800` 抽图片 md5。
+- **Phase 1 注意**：shortvideo 的文件名规则未验证（图片的 crc64 规则已确定）。
 
 ## 语义 / 向量搜索 — 评估后暂不做（2026-10-16 记）
 
