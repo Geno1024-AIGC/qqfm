@@ -465,6 +465,9 @@ static int run_pics(sqlite3 *db, const char *table, nt_buf *out,
         int n = sqlite3_column_bytes(st, 3);
 
         rows++;
+        if ((rows % 200000) == 0)
+            fprintf(stderr, "ntdbread: %s scanned=%d media=%d\n", table, rows,
+                    matches);
         if (!blob || n <= 0) continue;
         if (!scan_blob(blob, (size_t)n, &p)) continue;
         matches++;
