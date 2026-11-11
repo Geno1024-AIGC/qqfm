@@ -15,7 +15,10 @@ cd "$(dirname "$0")"
 NDK="${ANDROID_NDK_HOME:-${ANDROID_HOME:-$HOME/Android/Sdk}/ndk/29.0.14206865}"
 HOSTCC="${HOSTCC:-cc}"
 CFLAGS="-O2 -std=gnu11 -Wall -Wextra -Wno-unused-parameter"
-SQLITE_CFLAGS="-O2 -std=gnu11 -w" # third-party: silence its own warnings
+SQLITE_CFLAGS="-O2 -std=gnu11 -w -DNTDB_UNLIMITED_PAGES" # third-party: silence its own warnings
+# NTDB_UNLIMITED_PAGES: our VFS owns all I/O and locking, so SQLite's reserved
+# locking page (page 262145 for 4 KiB pages) must be readable — QQ's >1 GiB
+# database has real rows there.
 SRC="src/aes.c src/sha512.c src/ntdb_vfs.c src/main.c"
 OUT_HOST="build/ntdbread-host"
 OUT_ARM64="build/ntdbread-arm64"

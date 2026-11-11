@@ -62822,7 +62822,17 @@ SQLITE_PRIVATE int sqlite3PagerSetPagesize(Pager *pPager, u32 *pPageSize, int nR
       pPager->pTmpSpace = pNew;
       pPager->dbSize = (Pgno)((nByte+pageSize-1)/pageSize);
       pPager->pageSize = pageSize;
+#ifdef NTDB_UNLIMITED_PAGES
+      /* Our VFS does its own locking on a file that already exists, so
+      ** SQLite's reserved "locking page" (the page holding PENDING_BYTE,
+      ** i.e. page 262145 for a 4 KiB page) is just data to us. QQ's database
+      ** is larger than 1 GiB and does store rows there; leaving lckPgno at
+      ** its normal value makes SQLite refuse that page with SQLITE_CORRUPT
+      ** ("database disk image is malformed"). 0 never matches a real page. */
+      pPager->lckPgno = 0;
+#else
       pPager->lckPgno = (Pgno)(PENDING_BYTE/pageSize) + 1;
+#endif
     }else{
       sqlite3PageFree(pNew);
     }

@@ -86,6 +86,15 @@ hex 的最后 3 个字符                                桶目录名
   （5 万行/块）：失败只丢当前块，重开库从 `last msgid` 续扫，已抽行全部保留；
   同一位置连续 3 次无进展才停，并把**已抽部分结果照常输出** + stderr 报
   resume point。一次性 SQL 查询仍是"缓冲 + 关库重开重试 3 次"。
+- **真机「固定 msgid 处 malformed」根因（2026-11-11 定案）**：**SQLite 的锁字节页**。
+  SQLite 把文件偏移 `PENDING_BYTE = 0x40000000`（**正好 1 GiB**）所在的页视为保留页
+  （4 KiB 页 → 第 `262145` 页），`getPageNormal()` 里 `pgno == PAGER_SJ_PGNO(pPager)`
+  直接返回 `SQLITE_CORRUPT`（"database disk image is malformed"）**且根本不发起 I/O**；
+  日志里表现为 `getAndInitPage pgno=262145` 之后没有任何 `vfs: read`。
+  QQ 的库 15.8 GB，那一页是**正常数据**（QQ 自己的 SQLite 处理了它），我们的 VFS 又自己
+  负责 I/O 与加锁，这个保留页规则对我们无意义 → 编译 `sqlite3.c` 时加 `-DNTDB_UNLIMITED_PAGES`
+  （`native/build.sh`），把 `pPager->lckPgno` 置 0（永不匹配真实页号），只读场景安全。
+  **这个坑只在库 > 1 GiB 时出现**，所以所有离线 fixture 测试都测不到，只能真机验证。
 - **诊断工具（2026-11-11 记）**：`--locate N` 不经过 SQLite 解析器，自己从
   `group_msg_table` 的 rootpage（可用 `--root` 覆盖）走 b-tree 到持有 rowid N 的叶子页，
   报告 `page / source(main|wal) / frame / type / ncells / depth / usable`、该页
