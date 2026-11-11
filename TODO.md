@@ -60,11 +60,20 @@ hex 的最后 3 个字符                                桶目录名
   kdf（4000 → 64000 → 256000 限量兜底）；开跑前先做 PBKDF2 已知答案自检，
   系统提供者口令编码不符就切手动 RFC 2898 实现。命中后校验 SQLite 头
   （页大小/版本字节/文本编码，误判率≈1e-10），再直解 `sqlite_master` 列出全部表名。全程只读、零拷贝。
-- **待真机回报**（探针结果）：
-  - 通过 → Phase 1 造 native 读取器：NDK + `sqlite3.c` + 1024 偏移 VFS，做成可执行文件由 `su` 跑，
-    进而全量扫 `40800` 抽图片 md5 → 会话映射；
-  - 不通过 → 该 QQ 版本密钥方案不同，需要先换取密钥方式（PC 工具 / frida 一次性导出后手输）。
-- **Phase 1 注意**：库是 WAL，`-wal` 要一起读；WAL 中的页同样要解密；
+- **Phase 0 真机通过（2026-11-11，QQ 9.1.35 / 15.8 GB 库）**：
+  - 命中参数：`流@1024 (OFFSET_VFS)`、salt=流起点 16 字节、`page=4096`、IV@页内 4048
+    （crypto reserve 48）、`kdf_iter=4000`、`HMAC_SHA1`、rand=`T0Q3eav8`（`QQ_NT DB` 标记 @32 后）、
+    uid=`754097987###u_NEM31P9-…`（路径公式吻合）、key=`af1401c2…`；派生+解密 433 ms，全程 1.2 s。
+  - `sqlite_master` 走读 7 页解出 **34 张表**（`c2c_msg_table`/`group_msg_table`/
+    `recent_contact_v3_table` 等与文档一致）→ 原地解密路径成立。
+  - 过程中修掉的真机问题：KernelSU 给本 app 的 su 交回**隔离挂载命名空间**
+    （`/data/data` 被 tmpfs 盖住，Termux/Root Explorer 正常）→ RootShell 检测到与 init
+    命名空间不同时自动 `nsenter -t 1 -m -- sh -c` 执行（glob 必须在目标命名空间内展开）。
+  - 待解小疑点：解密出的头 `byte20=80`（SQLite 视角 usable=4016）与 crypto IV 位置
+    （4048 → reserve 48）不一致——记录解析时按实测定 usable，不阻塞。
+- **Phase 1（下一步）**：NDK + `sqlite3.c` + 1024 偏移 VFS，native 工具由 `su` 跑，
+  全量扫 `40800` 抽图片 md5 → 会话映射；NDK 未装（`dl.google.com` 可达）。
+- **Phase 1 注意**：库是 WAL（-wal 3.7 MB），`-wal` 要一起读；WAL 中的页同样要解密；
   shortvideo 的文件名规则未验证（图片的 crc64 规则已确定）。
 
 ## 语义 / 向量搜索 — 评估后暂不做（2026-10-16 记）
