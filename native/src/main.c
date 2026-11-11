@@ -764,7 +764,8 @@ int main(int argc, char **argv)
         struct pics_run prun;
         int attempt = 0, rows = 0, open_failed = 0;
         int fails = 0, prev_table = 0;
-        long long prev_last = -1;
+        int skip_table = -1, skipped = 0;
+        long long prev_last = -1, skip_last = -1;
 
         memset(&prun, 0, sizeof(prun));
         prun.last = -1;
@@ -816,18 +817,40 @@ int main(int argc, char **argv)
                 if (prun.table != prev_table || prun.last != prev_last) {
                     fails = 0; /* new ground covered — keep going */
                 } else if (++fails >= 3) {
+                    /* One torn table is not a reason to lose the others: QQ
+                     * rewrites its newest pages while we read them, and the
+                     * damage is confined to one b-tree. Note where the good
+                     * part ended, step over the table and keep going. The run
+                     * still exits non-zero so a caller can tell the result is
+                     * short. */
                     fprintf(stderr,
-                            "ntdbread: no progress after 3 attempts, stopping "
-                            "at table=%s msgid>%lld\n",
-                            prun.table < PICS_TABLES
-                                ? pics_tables[prun.table]
-                                : "?",
+                            "ntdbread: no progress after 3 attempts, skipping "
+                            "table=%s msgid>%lld\n",
+                            prun.table < PICS_TABLES ? pics_tables[prun.table]
+                                                      : "?",
                             prun.last);
-                    break;
+                    if (skipped == 0) {
+                        skip_table = prun.table;
+                        skip_last = prun.last;
+                    }
+                    skipped++;
+                    fails = 0;
+                    prun.table++;
+                    prun.last = -1;
+                    if (prun.table >= PICS_TABLES) break;
+                    continue;
                 }
             } else if (attempt >= 3) {
                 break;
             }
+        }
+
+        if (skipped && rc == SQLITE_OK) {
+            /* Everything after the torn table was read, so this is not a hard
+             * failure — but the answer is still incomplete. */
+            snprintf(emsg, sizeof(emsg), "%s: gave up at msgid>%lld",
+                     pics_tables[skip_table], skip_last);
+            rc = SQLITE_ERROR;
         }
 
         if (rc != SQLITE_OK) {
@@ -856,7 +879,9 @@ int main(int argc, char **argv)
                 fprintf(stderr,
                         "ntdbread: partial list: %d media rows, resume point "
                         "table=%d msgid>%lld\n",
-                        prun.matches, prun.table, prun.last);
+                        prun.matches,
+                        skip_table >= 0 ? skip_table : prun.table,
+                        skip_table >= 0 ? skip_last : prun.last);
             }
             free(out.p);
             if (db) sqlite3_close(db);

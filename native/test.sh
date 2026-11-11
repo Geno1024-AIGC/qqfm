@@ -140,8 +140,16 @@ grep -q "no progress after 3 attempts" "$TORNERR" \
     || { echo "FAIL: no give-up message" >&2; exit 1; }
 grep -q "partial list" "$TORNERR" \
     || { echo "FAIL: no partial-list message" >&2; exit 1; }
-[ "$(printf '%s\n' "$TORNOUT" | wc -l)" -eq 1 ] \
-    || { echo "FAIL: expected header only on stdout" >&2; exit 1; }
+# The torn table is group_msg_table; the c2c table is intact, so its rows must
+# still come out. Losing the rest of the database to one bad b-tree is the bug
+# this checks for.
+printf '%s\n' "$TORNOUT" | awk -F'\t' 'NR==1 {
+    if ($1!="table" || $2!="msgid" || $3!="peer" || $4!="sender" ||
+        $5!="elem" || $6!="md5" || $7!="filename" || $8!="size") exit 1
+    next
+} END {exit !(NR>0)}' || { echo "FAIL: pics header missing" >&2; exit 1; }
+printf '%s\n' "$TORNOUT" | grep -q "0f4b1c7a9d3e5268b0ac41d7e93f2a51" \
+    || { echo "FAIL: intact c2c table was not scanned after the torn one" >&2; exit 1; }
 rm -f "$TORN" "$TORNERR"
 
 echo "== wrong key is rejected =="
