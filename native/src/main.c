@@ -169,6 +169,7 @@ static void usage(void)
 struct pic_info {
     char md5[33];
     char name[96];
+    char path[320]; /* f45403: "::NTOSFull::<local path>" when the sender wrote one */
     long long size; /* f45405 */
     long long elem; /* f40010 */
     int have;
@@ -254,6 +255,16 @@ static void scan_element(const unsigned char *b, size_t n, struct pic_info *p)
                     p->name[k] = (c >= 0x20 && c < 0x7f) ? (char)c : '?';
                 }
                 p->name[len] = '\0';
+            } else if (fn == 45403 && len && len < sizeof(p->path)) {
+                /* The local path the sending client wrote, shaped
+                 * "::NTOSFull::/storage/.../chatraw/abc/Cache_<id>". It is the one
+                 * place a message names the cache file it belongs to, so a sender's
+                 * own pictures can be filed without hashing anything. */
+                for (k = 0; k < len; k++) {
+                    unsigned char c = val[k];
+                    p->path[k] = (c >= 0x20 && c < 0x7f) ? (char)c : '?';
+                }
+                p->path[len] = '\0';
             }
             break;
         }
@@ -489,7 +500,7 @@ static int run_pics_resume(sqlite3 *db, struct pics_run *st, nt_buf *out,
 
     if (!st->header) {
         buf_add(out, "table\tmsgid\tpeer\tsender\telem\tmd5\tfilename"
-                     "\tsize\n");
+                     "\tsize\tpath\n");
         st->header = 1;
     }
 
@@ -551,8 +562,8 @@ static int run_pics_resume(sqlite3 *db, struct pics_run *st, nt_buf *out,
             buf_add_text(q, 1, out);
             buf_add(out, "\t");
             buf_add_text(q, 2, out);
-            buf_add(out, "\t%lld\t%s\t%s\t%lld\n", p.elem, p.md5, p.name,
-                    p.size);
+            buf_add(out, "\t%lld\t%s\t%s\t%lld\t%s\n", p.elem, p.md5, p.name,
+                    p.size, p.path);
         }
         if (rc == SQLITE_DONE) rc = SQLITE_OK;
         if (rc != SQLITE_OK) {

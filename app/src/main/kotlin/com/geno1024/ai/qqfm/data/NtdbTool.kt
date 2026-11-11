@@ -125,6 +125,12 @@ object NtdbTool {
         val elem: Int,
         val md5: String,
         val size: Long,
+        /**
+         * The local cache path the sending client wrote, when it wrote one:
+         * `::NTOSFull::/storage/.../chatimg/0e6/Cache_<id>`. Only trusted when the
+         * name it ends in exists in this device's cache.
+         */
+        val path: String?,
     ) {
         companion object {
             fun parse(line: String): PicRow? {
@@ -134,7 +140,16 @@ object NtdbTool {
                 val msgid = f[1].toLongOrNull() ?: return null
                 val elem = f[4].toIntOrNull() ?: return null
                 if (f[5].length != 32) return null
-                return PicRow(f[0], msgid, f[2], f[3], elem, f[5], f[7].toLongOrNull() ?: -1L)
+                return PicRow(
+                    table = f[0],
+                    msgid = msgid,
+                    peer = f[2],
+                    sender = f[3],
+                    elem = elem,
+                    md5 = f[5],
+                    size = f[7].toLongOrNull() ?: -1L,
+                    path = f.getOrNull(8)?.takeIf { it.isNotEmpty() },
+                )
             }
         }
     }

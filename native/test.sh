@@ -91,7 +91,8 @@ pic_row() {  # pic_row table msgid peer sender elem md5 filename size
 }
 printf '%s\n' "$PICS" | awk -F'\t' 'NR==1 {
     if ($1!="table" || $2!="msgid" || $3!="peer" || $4!="sender" ||
-        $5!="elem" || $6!="md5" || $7!="filename" || $8!="size") exit 1
+        $5!="elem" || $6!="md5" || $7!="filename" || $8!="size" ||
+        $9!="path") exit 1
     next
 } {rows++}
 END {exit !(NR>0 && rows==3)}' || { echo "FAIL: pics header/row count" >&2; exit 1; }
