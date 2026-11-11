@@ -99,6 +99,20 @@ class ConversationIndex(context: Context) {
         helper.readableDatabase.rawQuery("SELECT peer FROM pic WHERE md5 = ?", arrayOf(md5))
             .use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
 
+    /**
+     * Every indexed md5 and its conversation, read in one pass.
+     *
+     * Grouping a tree asks about a hundred thousand pictures at once; one query per
+     * picture would spend more time in SQLite than the grouping does.
+     */
+    fun allPeers(): Map<String, String> {
+        val out = HashMap<String, String>(100_000)
+        helper.readableDatabase.rawQuery("SELECT md5, peer FROM pic", null).use { cursor ->
+            while (cursor.moveToNext()) out[cursor.getString(0)] = cursor.getString(1)
+        }
+        return out
+    }
+
     fun indexed(): Int =
         helper.readableDatabase.rawQuery("SELECT COUNT(*) FROM pic", null).use { cursor ->
             if (cursor.moveToFirst()) cursor.getInt(0) else 0
@@ -117,9 +131,8 @@ class ConversationIndex(context: Context) {
     /** Display names for [peers], read from QQ's own group and profile databases. */
     fun namePeers(target: NtdbTool.Target, context: Context, peers: Collection<String>) {
         if (peers.isEmpty()) return
-        val groups = peers.filter { it.all(Char::isDigit) }
-        val uids = peers.filterNot { it.all(Char::isDigit) }
-        val names = HashMap<String, String>()
+        val groups = peers.filter { it.all(Char::isDigit) }.toHashSet()
+        val uids = peers.filterNot { it.all(Char::isDigit) }.toHashSet()
         val db = helper.writableDatabase
 
         fun store(peer: String, name: String) {
@@ -128,29 +141,28 @@ class ConversationIndex(context: Context) {
                 "INSERT OR REPLACE INTO peer_name(peer, name) VALUES(?, ?)",
                 arrayOf<Any>(peer, name),
             )
-            names[peer] = name
         }
 
-        groups.chunked(200).forEach { chunk ->
-            val list = chunk.joinToString(",") { "'" + it.replace("'", "''") + "'" }
+        // One query per database, filtered here rather than with `IN (...)`: the
+        // reader makes SQLite decrypt the whole table for every call, and a peer
+        // list is long enough that chunking it costs more than reading the names.
+        if (groups.isNotEmpty()) {
             NtdbTool.forEachRow(
                 context, target, "${target.dbDir}/group_info.db",
-                "SELECT \"60001\", \"60007\" FROM group_list WHERE \"60001\" IN ($list)",
+                "SELECT \"60001\", \"60007\" FROM group_list",
             ) { f ->
-                if (f.size >= 2) store(f[0], f[1])
+                if (f.size >= 2 && f[0] in groups) store(f[0], f[1])
             }
         }
 
-        uids.chunked(200).forEach { chunk ->
-            val list = chunk.joinToString(",") { "'" + it.replace("'", "''") + "'" }
+        if (uids.isNotEmpty()) {
             NtdbTool.forEachRow(
                 context, target, "${target.dbDir}/profile_info.db",
                 // 1000 = uid, 20002 = nickname, 20009 = remark; the remark is what
                 // the user named the friend themselves, so it wins when present.
-                "SELECT \"1000\", \"20002\", \"20009\" FROM profile_info_v6 " +
-                    "WHERE \"1000\" IN ($list)",
+                "SELECT \"1000\", \"20002\", \"20009\" FROM profile_info_v6",
             ) { f ->
-                if (f.size >= 3) {
+                if (f.size >= 3 && f[0] in uids) {
                     store(f[0], f[2].ifBlank { f[1] })
                 }
             }
