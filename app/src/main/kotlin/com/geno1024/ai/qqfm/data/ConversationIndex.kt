@@ -25,6 +25,7 @@ class ConversationIndex(context: Context) {
             beginTransaction()
             try {
                 execSQL("DELETE FROM pic")
+                execSQL("DELETE FROM named")
                 setTransactionSuccessful()
             } finally {
                 endTransaction()
@@ -33,16 +34,25 @@ class ConversationIndex(context: Context) {
     }
 
     /**
-     * Rebuilds the picture index from a live scan of the message database.
+     * Rebuilds the index from a live scan of the message database.
      *
-     * [needed] is the set of md5s the device can actually show; rows for anything
-     * else are dropped as they stream past, so the index never outgrows the cache.
-     * Only element type 2 is a picture — the same md5 appears on videos, files and
-     * voice notes, and grouping those with photos would be wrong.
+     * Two routes, because QQ records two different things:
+     *
+     *  - [needed] md5s: the bytes of `chatraw` are the bytes that were sent, so a
+     *    picture there matches the message's own md5. Only element type 2 is a
+     *    picture; the same md5 appears on videos, files and voice notes.
+     *  - [localBases]: a message the user sent from this phone carries the local
+     *    cache path it wrote (`f45403`, `::NTOSFull::…/Cache_<id>`). That name is
+     *    only usable when the file exists here — another sender's path names a file
+     *    on their phone — so it is checked against the cache before it is stored.
+     *
+     * Pairs are filed under the earliest message that carried them: a picture is
+     * "from" the conversation it first appeared in, not the latest forward.
      */
     fun rebuildFrom(
         target: NtdbTool.Target,
         needed: Set<String>,
+        localBases: Set<String>,
         context: Context,
         onProgress: (scanned: Long, matched: Int) -> Unit = { _, _ -> },
     ) {
@@ -50,6 +60,7 @@ class ConversationIndex(context: Context) {
         db.beginTransaction()
         try {
             db.execSQL("DELETE FROM pic")
+            db.execSQL("DELETE FROM named")
             db.setTransactionSuccessful()
         } finally {
             db.endTransaction()
@@ -61,13 +72,27 @@ class ConversationIndex(context: Context) {
         val insert = db.compileStatement(
             "INSERT OR IGNORE INTO pic(md5, peer, msgid, sender) VALUES(?, ?, ?, ?)",
         )
-        // The same picture is often forwarded into several conversations. The first
-        // message that carried it is the one the picture is "from", so a later row
-        // only replaces an earlier one when its msgid is older. Upsert syntax needs
-        // SQLite 3.24 and this app runs on 26, so the update is spelled out.
+        // Upsert syntax needs SQLite 3.24 and this app runs on 26, so the "only when
+        // older" update is spelled out instead.
         val replace = db.compileStatement(
             "UPDATE pic SET peer = ?, msgid = ?, sender = ? WHERE md5 = ? AND msgid > ?",
         )
+        val insertNamed = db.compileStatement(
+            "INSERT OR IGNORE INTO named(base, peer, msgid) VALUES(?, ?, ?)",
+        )
+        val replaceNamed = db.compileStatement(
+            "UPDATE named SET peer = ?, msgid = ? WHERE base = ? AND msgid > ?",
+        )
+
+        fun bumpBatch() {
+            if (++batch >= 4000) {
+                db.setTransactionSuccessful()
+                db.endTransaction()
+                db.beginTransaction()
+                batch = 0
+            }
+        }
+
         try {
             db.beginTransaction()
             try {
@@ -88,15 +113,27 @@ class ConversationIndex(context: Context) {
                             replace.execute()
                         }
                         matched++
-                        // Commit every so often so a long scan survives the app
-                        // being stopped, and so the gallery can read meanwhile.
-                        if (++batch >= 4000) {
-                            db.setTransactionSuccessful()
-                            db.endTransaction()
-                            db.beginTransaction()
-                            batch = 0
-                        }
+                        bumpBatch()
                     }
+
+                    // Sent-from-here pictures name their own cache file. Element type
+                    // is 3 on these, so this is deliberately outside the check above.
+                    val base = row.path?.substringAfterLast('/', "")?.removePrefix("Cache_")
+                    if (!base.isNullOrEmpty() && base in localBases) {
+                        insertNamed.bindString(1, base)
+                        insertNamed.bindString(2, row.peer)
+                        insertNamed.bindLong(3, row.msgid)
+                        if (insertNamed.executeInsert() < 0) {
+                            replaceNamed.bindString(1, row.peer)
+                            replaceNamed.bindLong(2, row.msgid)
+                            replaceNamed.bindString(3, base)
+                            replaceNamed.bindLong(4, row.msgid)
+                            replaceNamed.execute()
+                        }
+                        matched++
+                        bumpBatch()
+                    }
+
                     if (scanned % 20_000 == 0L) onProgress(scanned, matched)
                 }
                 db.setTransactionSuccessful()
@@ -106,6 +143,8 @@ class ConversationIndex(context: Context) {
         } finally {
             insert.close()
             replace.close()
+            insertNamed.close()
+            replaceNamed.close()
         }
         onProgress(scanned, matched)
     }
@@ -129,8 +168,29 @@ class ConversationIndex(context: Context) {
         return out
     }
 
-    fun indexed(): Int =
-        helper.readableDatabase.rawQuery("SELECT COUNT(*) FROM pic", null).use { cursor ->
+    /** Every cache name (without `Cache_`) a sent-from-here message named. */
+    fun allNamed(): Map<String, String> {
+        val out = HashMap<String, String>(50_000)
+        helper.readableDatabase.rawQuery("SELECT base, peer FROM named", null).use { cursor ->
+            while (cursor.moveToNext()) out[cursor.getString(0)] = cursor.getString(1)
+        }
+        return out
+    }
+
+    fun indexed(): Int {
+        val db = helper.readableDatabase
+        val byMd5 = db.rawQuery("SELECT COUNT(*) FROM pic", null).use { cursor ->
+            if (cursor.moveToFirst()) cursor.getInt(0) else 0
+        }
+        val byName = db.rawQuery("SELECT COUNT(*) FROM named", null).use { cursor ->
+            if (cursor.moveToFirst()) cursor.getInt(0) else 0
+        }
+        return byMd5 + byName
+    }
+
+    /** How many cache names were filed by the path route. */
+    fun namedCount(): Int =
+        helper.readableDatabase.rawQuery("SELECT COUNT(*) FROM named", null).use { cursor ->
             if (cursor.moveToFirst()) cursor.getInt(0) else 0
         }
 
@@ -138,7 +198,9 @@ class ConversationIndex(context: Context) {
     fun peers(): List<Pair<String, Int>> {
         val out = ArrayList<Pair<String, Int>>()
         helper.readableDatabase.rawQuery(
-            "SELECT peer, COUNT(*) AS n FROM pic GROUP BY peer ORDER BY n DESC",
+            "SELECT peer, COUNT(*) AS n FROM (" +
+                "SELECT peer FROM pic UNION ALL SELECT peer FROM named" +
+                ") GROUP BY peer ORDER BY n DESC",
             null,
         ).use { cursor -> while (cursor.moveToNext()) out.add(cursor.getString(0) to cursor.getInt(1)) }
         return out
@@ -189,7 +251,7 @@ class ConversationIndex(context: Context) {
         helper.readableDatabase.rawQuery("SELECT name FROM peer_name WHERE peer = ?", arrayOf(peer))
             .use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
 
-    private class Helper(context: Context) : SQLiteOpenHelper(context, "conversation.db", null, 1) {
+    private class Helper(context: Context) : SQLiteOpenHelper(context, "conversation.db", null, 2) {
         init {
             // The scan writes while the gallery reads; WAL keeps them apart.
             setWriteAheadLoggingEnabled(true)
@@ -204,11 +266,28 @@ class ConversationIndex(context: Context) {
                     "sender TEXT NOT NULL)",
             )
             db.execSQL("CREATE INDEX pic_peer ON pic(peer)")
+            db.execSQL(
+                "CREATE TABLE named(" +
+                    "base TEXT PRIMARY KEY, " +
+                    "peer TEXT NOT NULL, " +
+                    "msgid INTEGER NOT NULL)",
+            )
+            db.execSQL("CREATE INDEX named_peer ON named(peer)")
             db.execSQL("CREATE TABLE peer_name(peer TEXT PRIMARY KEY, name TEXT NOT NULL)")
         }
 
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-            // The index is expensive to build, so upgrades never drop it.
+            // The index is expensive to build, so upgrades never drop it. Version 2
+            // adds the name route; its table starts empty and the next build fills it.
+            if (oldVersion < 2) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS named(" +
+                        "base TEXT PRIMARY KEY, " +
+                        "peer TEXT NOT NULL, " +
+                        "msgid INTEGER NOT NULL)",
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS named_peer ON named(peer)")
+            }
         }
     }
 }

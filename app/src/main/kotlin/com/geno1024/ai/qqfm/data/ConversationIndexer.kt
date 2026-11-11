@@ -39,8 +39,10 @@ class ConversationIndexer(
         val files: Int,
         /** Pictures whose md5 is now known. */
         val hashed: Int,
-        /** Conversation links stored. */
+        /** Links stored by either route. */
         val indexed: Int,
+        /** Links stored from a message that named its own cache file. */
+        val named: Int,
         val conversations: Int,
     )
 
@@ -78,8 +80,18 @@ class ConversationIndexer(
         val needed = items.mapNotNullTo(HashSet()) { item -> cache[item.base]?.md5 }
         if (needed.isEmpty()) return Outcome.Failed("还没有任何图片的 md5 可对上消息")
 
+        // Every cache name on the device, so a message's own path can be trusted.
+        // The other trees are only read if they were already scanned: making the
+        // user wait through two more walks to use this route would cost more than
+        // it gives back.
+        val localBases = HashSet<String>(200_000)
+        items.mapTo(localBases) { it.base }
+        listOf(MediaSource.IMG, MediaSource.THUMB).forEach { source ->
+            repository.loadCached(source)?.mapTo(localBases) { it.base }
+        }
+
         val matched = intArrayOf(0)
-        conversations.rebuildFrom(target, needed, context) { scanned, found ->
+        conversations.rebuildFrom(target, needed, localBases, context) { scanned, found ->
             matched[0] = found
             onPhase(Phase.ReadingMessages(scanned, found))
         }
@@ -93,6 +105,7 @@ class ConversationIndexer(
                 files = items.size,
                 hashed = needed.size,
                 indexed = matched[0],
+                named = conversations.namedCount(),
                 conversations = peers.size,
             ),
         )
@@ -100,6 +113,39 @@ class ConversationIndexer(
 
     /** md5 → conversation for every indexed picture. */
     fun peersByMd5(): Map<String, String> = conversations.allPeers()
+
+    /** A conversation a picture belongs to, and how to show it. */
+    data class Conversation(val peer: String, val name: String)
+
+    /**
+     * Every indexed picture base (`Cache_` stripped) with the conversation it came
+     * from.
+     *
+     * Resolving a name costs a lookup, so it happens once here; grouping a tree then
+     * only has to read a map.
+     */
+    fun conversationsByBase(): Map<String, Conversation> {
+        val names = HashMap<String, String>()
+        val out = HashMap<String, Conversation>(200_000)
+
+        fun put(base: String, peer: String) {
+            val name = names.getOrPut(peer) { nameOf(peer) ?: peer }
+            out[base] = Conversation(peer, name)
+        }
+
+        // The name route covers pictures sent from this phone (any tree); the md5
+        // route covers everything else that `chatraw` kept. Where both know a base,
+        // the named one is the direct statement, so it wins.
+        conversations.allNamed().forEach { (base, peer) -> put(base, peer) }
+        val peers = conversations.allPeers()
+        if (peers.isNotEmpty()) {
+            md5ByBase().forEach { (base, md5) ->
+                val peer = peers[md5] ?: return@forEach
+                if (base !in out) put(base, peer)
+            }
+        }
+        return out
+    }
 
     /** base (file name without `Cache_`) → md5, from the hash cache. */
     fun md5ByBase(): Map<String, String> =

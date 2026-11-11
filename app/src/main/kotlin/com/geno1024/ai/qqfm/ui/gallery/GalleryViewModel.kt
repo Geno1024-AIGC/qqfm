@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.geno1024.ai.qqfm.data.AppSettings
+import com.geno1024.ai.qqfm.data.ConversationIndexer
 import com.geno1024.ai.qqfm.data.ImageStore
 import com.geno1024.ai.qqfm.data.MediaItem
 import com.geno1024.ai.qqfm.data.MediaRepository
@@ -47,6 +48,9 @@ enum class SortMode {
     SIZE_DESC,
     SIZE_ASC,
     NAME,
+
+    /** Groups pictures by the conversation they were sent in. */
+    CONVERSATION,
 }
 
 /**
@@ -97,6 +101,9 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private val repository = MediaRepository(application) { settings.persistScanIndex }
     val imageStore = ImageStore(application)
 
+    /** Reads which conversation each `chatraw` picture came from. */
+    private val conversations = ConversationIndexer(application, repository)
+
     private val ocrIndex = OcrIndex(application)
     /** Built on first use: the model and its native libraries are not needed to browse. */
     private var ocrEngine: OcrEngine? = null
@@ -108,6 +115,10 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     private var rawItems: List<MediaItem> = emptyList()
     private var byId: Map<String, MediaItem> = emptyMap()
+
+    /** Item id → conversation peer, for the pictures the index knows about. */
+    private var peerOfItem: Map<String, String> = emptyMap()
+    private var nameOfPeer: Map<String, String> = emptyMap()
 
     private var dragAnchorRow: Int = -1
     private var dragPinned: Set<String> = emptySet()
@@ -129,6 +140,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             val root = withContext(Dispatchers.IO) { RootShell.isRootAvailable() }
             val indexed = withContext(Dispatchers.IO) { ocrIndex.count() }
             _state.update { it.copy(rootAvailable = root, loading = false, ocrIndexed = indexed) }
+            if (root) refreshConversations()
         }
     }
 
@@ -177,7 +189,34 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun refresh() {
-        if (_state.value.rootAvailable == true) load(forceScan = true)
+        if (_state.value.rootAvailable == true) {
+            load(forceScan = true)
+            refreshConversations()
+        }
+    }
+
+    /**
+     * Reloads the picture → conversation map.
+     *
+     * The index is built from the about page and can change while the gallery is
+     * open, so this is re-run on refresh rather than read once at startup. An empty
+     * index is not an error: every picture simply lands in the unknown group.
+     */
+    fun refreshConversations() {
+        viewModelScope.launch {
+            val byBase = withContext(Dispatchers.IO) { conversations.conversationsByBase() }
+            val peers = HashMap<String, String>(byBase.size * 2)
+            val names = HashMap<String, String>()
+            byBase.forEach { (base, conversation) ->
+                // Keyed by cache name, not by tree: a message that names its own file
+                // may point at any of the three trees, and the names never collide.
+                peers[base] = conversation.peer
+                names[conversation.peer] = conversation.name
+            }
+            peerOfItem = peers
+            nameOfPeer = names
+            if (_state.value.sortMode == SortMode.CONVERSATION) republish()
+        }
     }
 
     /** Keeps a frozen image out of the gallery, for people who pin to forget. */
@@ -445,6 +484,9 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 selectionBytes = 0L,
             ).withRows()
         }
+        // Selecting the conversation grouping is the first moment the map matters;
+        // loading it then keeps a gallery that never uses it free of the read.
+        if (mode == SortMode.CONVERSATION) refreshConversations()
     }
 
     fun toggleCollapse(key: String) {
@@ -690,6 +732,9 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    /** The conversation peer of an item, or empty when the index does not know it. */
+    private fun peerOf(item: MediaItem): String = peerOfItem[item.base].orEmpty()
+
     private fun sort(items: List<MediaItem>, mode: SortMode): List<MediaItem> {
         val comparator = when (mode) {
             SortMode.TIME_DESC -> compareByDescending<MediaItem> { it.mtime }.thenBy { it.base }
@@ -697,6 +742,15 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             SortMode.SIZE_DESC -> compareByDescending<MediaItem> { it.size }.thenBy { it.base }
             SortMode.SIZE_ASC -> compareBy<MediaItem> { it.size }.thenBy { it.base }
             SortMode.NAME -> compareBy { it.base }
+            SortMode.CONVERSATION -> {
+                // Groups are ordered by how many pictures they hold, so the busiest
+                // conversation is reachable without scrolling, and inside a group
+                // the newest picture comes first.
+                val counts = items.groupingBy { peerOf(it) }.eachCount()
+                compareByDescending<MediaItem> { counts[peerOf(it)] ?: 0 }
+                    .thenBy { peerOf(it) }
+                    .thenByDescending { it.mtime }
+            }
         }
         return items.sortedWith(comparator)
     }
@@ -709,19 +763,34 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private fun buildRows(items: List<MediaItem>, mode: SortMode, collapsed: Set<String>): List<GalleryRow> {
         val byTime = mode == SortMode.TIME_DESC || mode == SortMode.TIME_ASC
         val bySize = mode == SortMode.SIZE_DESC || mode == SortMode.SIZE_ASC
-        if (!byTime && !bySize) {
+        val byConversation = mode == SortMode.CONVERSATION
+        if (!byTime && !bySize && !byConversation) {
             return items.indices.map { GalleryRow.Item(it) }
         }
 
         val rows = ArrayList<GalleryRow>(items.size + 16)
         var start = 0
         while (start < items.size) {
-            val bucket = if (byTime) bucketTime(items[start].mtime) else bucketSize(items[start].size)
+            val bucket = when {
+                byConversation -> {
+                    val peer = peerOf(items[start])
+                    Bucket("c:$peer", nameOfPeer[peer] ?: UNKNOWN_CONVERSATION)
+                }
+                byTime -> bucketTime(items[start].mtime)
+                else -> bucketSize(items[start].size)
+            }
             var end = start
             var bytes = 0L
             while (end < items.size) {
                 val entry = items[end]
-                val other = if (byTime) bucketTime(entry.mtime) else bucketSize(entry.size)
+                val other = when {
+                    byConversation -> {
+                        val peer = peerOf(entry)
+                        Bucket("c:$peer", nameOfPeer[peer] ?: UNKNOWN_CONVERSATION)
+                    }
+                    byTime -> bucketTime(entry.mtime)
+                    else -> bucketSize(entry.size)
+                }
                 if (other.key != bucket.key) break
                 bytes += entry.size
                 end++
@@ -797,7 +866,11 @@ fun sortLabel(mode: SortMode): String = when (mode) {
     SortMode.SIZE_DESC -> "大小（大 → 小）"
     SortMode.SIZE_ASC -> "大小（小 → 大）"
     SortMode.NAME -> "名称"
+    SortMode.CONVERSATION -> "会话"
 }
+
+/** Group header for pictures whose conversation the index does not know. */
+private const val UNKNOWN_CONVERSATION = "未分类"
 
 private const val SIZE_STEP = 64L * 1024
 private const val SIZE_TOP = 64L * 1024 * 1024

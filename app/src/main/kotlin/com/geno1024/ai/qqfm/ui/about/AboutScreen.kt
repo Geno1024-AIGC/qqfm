@@ -462,7 +462,8 @@ fun AboutScreen(
                                 is ConversationIndexer.Outcome.Done -> {
                                     val r = outcome.result
                                     "✅ chatraw ${r.files} 张，算出 md5 ${r.hashed} 张；" +
-                                        "对上消息 ${r.indexed} 张，分布在 ${r.conversations} 个会话"
+                                        "对上消息 ${r.indexed} 条（其中消息自带路径 ${r.named} 条），" +
+                                        "分布在 ${r.conversations} 个会话"
                                 }
                             }
                         }
