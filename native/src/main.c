@@ -549,6 +549,16 @@ static int run_pics_resume(sqlite3 *db, struct pics_run *st, nt_buf *out,
         }
         sqlite3_finalize(q);
 
+        /* Hand the finished chunk over now: memory stays flat and a killed
+         * run keeps everything it had already reported. Rows of an aborted
+         * chunk stay buffered, and the retry resumes past them, so nothing
+         * is lost or duplicated. */
+        if (out->len) {
+            fwrite(out->p, 1, out->len, stdout);
+            fflush(stdout);
+            out->len = 0;
+        }
+
         if (chunk_rows < chunk) { /* short chunk: table exhausted */
             st->table++;
             st->last = -1;
