@@ -22,6 +22,8 @@ SQLITE_CFLAGS="-O2 -std=gnu11 -w -DNTDB_UNLIMITED_PAGES" # third-party: silence 
 SRC="src/aes.c src/sha512.c src/ntdb_vfs.c src/main.c"
 OUT_HOST="build/ntdbread-host"
 OUT_ARM64="build/ntdbread-arm64"
+# Where gradle picks the arm64 binary up for the APK.
+ASSET_DIR="../app/src/main/assets"
 
 mkdir -p build
 
@@ -54,4 +56,8 @@ fi
 echo "== arm64 (minSdk 26) =="
 build_one "$CC" "$OUT_ARM64"
 file "$OUT_ARM64" 2>/dev/null || true
-echo "built: $OUT_HOST $OUT_ARM64"
+# The APK ships this binary and runs it through su, so it has to be in assets
+# before gradle assembles anything. It is a build artifact: never committed.
+mkdir -p "$ASSET_DIR"
+cp "$OUT_ARM64" "$ASSET_DIR/ntdbread-arm64"
+echo "built: $OUT_HOST $OUT_ARM64 -> $ASSET_DIR/ntdbread-arm64"

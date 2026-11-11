@@ -15,3 +15,5 @@ captures/
 .kotlin/
 mob.txt
 __pycache__/
+# Built by native/build.sh and shipped inside the APK; not source.
+app/src/main/assets/ntdbread-arm64
