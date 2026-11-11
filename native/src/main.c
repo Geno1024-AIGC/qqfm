@@ -67,6 +67,13 @@ static void hex_encode(const unsigned char *in, size_t n, char *out)
     out[n * 2] = '\0';
 }
 
+static void dump_hex(const unsigned char *b, size_t n)
+{
+    size_t i;
+    for (i = 0; i < n; i++) printf("%02x", b[i]);
+    putchar('\n');
+}
+
 /*
  * A live nt_msg.db is still being written by QQ while we read it, so a scan
  * can occasionally observe a torn page ("database disk image is malformed").
@@ -140,6 +147,10 @@ static void usage(void)
             "               TSV: table msgid col40011 col40020 elem md5\n"
             "               filename size (-1 = unknown) for every message\n"
             "               body carrying an image/video md5\n"
+            "  --locate N   walk the b-tree to the leaf holding msgid N and\n"
+            "               report the page's cells (root auto-detected for\n"
+            "               group_msg_table; --root overrides)\n"
+            "  --dump-page N  dump page N: source, type, cell count, bytes\n"
             "  SQL          one statement; results printed as TSV with a\n"
             "               header line of column names\n",
             NT_KDF_ITER);
@@ -555,6 +566,9 @@ int main(int argc, char **argv)
     unsigned char key[32];
     sqlite3 *db = NULL;
     int no_wal = 0, kat_only = 0, pics = 0;
+    int locate = 0, dump = 0;
+    long long locate_key = 0;
+    unsigned int dump_pgno = 0, root_pgno = 0;
     int i, rc;
 
     for (i = 1; i < argc; i++) {
@@ -565,6 +579,17 @@ int main(int argc, char **argv)
             no_wal = 1;
         } else if (strcmp(a, "--pics") == 0) {
             pics = 1;
+        } else if (strcmp(a, "--locate") == 0) {
+            if (++i >= argc) die("--locate needs a msgid");
+            locate_key = strtoll(argv[i], NULL, 10);
+            locate = 1;
+        } else if (strcmp(a, "--dump-page") == 0) {
+            if (++i >= argc) die("--dump-page needs a page number");
+            dump_pgno = (unsigned int)strtoul(argv[i], NULL, 10);
+            dump = 1;
+        } else if (strcmp(a, "--root") == 0) {
+            if (++i >= argc) die("--root needs a page number");
+            root_pgno = (unsigned int)strtoul(argv[i], NULL, 10);
         } else if (strcmp(a, "--key") == 0) {
             if (++i >= argc) die("--key needs a value");
             keyhex = argv[i];
@@ -599,6 +624,7 @@ int main(int argc, char **argv)
         return 2;
     }
     if (pics && sql) die("--pics does not take a SQL statement");
+    if ((locate || dump) && sql) die("--locate/--dump-page do not take SQL");
 
     if (keyhex) {
         if (hex_decode(keyhex, key, 32)) die("--key must be 64 hex characters");
@@ -629,6 +655,79 @@ int main(int argc, char **argv)
     nt_vfs_set_key(key);
     nt_vfs_set_no_wal(no_wal);
     if (nt_vfs_register() != SQLITE_OK) die("cannot register the VFS");
+
+    /* Diagnostics that bypass SQLite's parser entirely. */
+    if (dump) {
+        unsigned char page[NT_PAGE];
+        unsigned int frame = 0;
+        long long usable = 0;
+
+        if (nt_vfs_dump_page(dbpath, dump_pgno, page, &frame, &usable))
+            die("cannot read page %u", dump_pgno);
+        printf("page=%u source=%s frame=%u type=0x%02x ncells=%u usable=%lld\n",
+               dump_pgno, frame ? "wal" : "main", frame, page[0],
+               ((unsigned)page[3] << 8) | page[4], usable);
+        printf("bytes: ");
+        dump_hex(page, 128);
+        return 0;
+    }
+    if (locate) {
+        nt_locate_info li;
+        unsigned char page[NT_PAGE];
+        unsigned int frame = 0;
+        long long usable = 0;
+
+        if (!root_pgno) {
+            sqlite3 *mdb = NULL;
+            sqlite3_stmt *q = NULL;
+            if (sqlite3_open_v2(dbpath, &mdb, SQLITE_OPEN_READONLY, NULL)
+                    == SQLITE_OK
+                && sqlite3_prepare_v2(mdb,
+                                      "SELECT rootpage FROM sqlite_master "
+                                      "WHERE name='group_msg_table';",
+                                      -1, &q, NULL) == SQLITE_OK
+                && sqlite3_step(q) == SQLITE_ROW)
+                root_pgno = (unsigned int)sqlite3_column_int64(q, 0);
+            sqlite3_finalize(q);
+            if (mdb) sqlite3_close(mdb);
+        }
+        if (!root_pgno)
+            die("cannot find the group_msg_table root page; pass --root");
+        if (nt_vfs_locate(dbpath, root_pgno, locate_key, &li))
+            die("cannot locate msgid %lld", locate_key);
+
+        printf("locate msgid=%lld root=%u\n", locate_key, root_pgno);
+        printf("page=%u source=%s frame=%u type=0x%02x ncells=%d depth=%d "
+               "usable=%lld\n",
+               li.pgno, li.frame ? "wal" : "main", li.frame, li.type,
+               li.ncells, li.depth, li.usable);
+        printf("keys: first=%lld last=%lld\n", li.first_key, li.last_key);
+        printf("badcells=%d", li.bad_cells);
+        if (li.bad_cells)
+            printf(" first_bad_cell=%u ofs=%u payload=%lld need=%lld",
+                   li.bad_cell, li.bad_ofs, li.bad_payload, li.bad_need);
+        printf("\n");
+        printf("overflow: cells=%lld pages=%lld bad=%u", li.over_cells,
+               li.over_pages, li.over_bad);
+        if (li.over_bad)
+            printf(" bad_cell=%u bad_pgno=%u depth=%u", li.over_bad_cell,
+                   li.over_bad_pgno, li.over_bad_link);
+        printf("\n");
+        if (li.target_found)
+            printf("target: rowid=%lld payload=%lld over_pgno=%u "
+                   "over_source=%s over_frame=%u\n",
+                   li.target_rowid, li.target_payload, li.target_over,
+                   li.target_over
+                       ? (li.target_frame ? "wal" : "main")
+                       : "inline",
+                   li.target_frame);
+        if (li.pgno
+            && !nt_vfs_dump_page(dbpath, li.pgno, page, &frame, &usable)) {
+            printf("bytes: ");
+            dump_hex(page, 96);
+        }
+        return 0;
+    }
 
     {
         nt_buf out = {NULL, 0, 0};

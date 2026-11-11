@@ -26,6 +26,52 @@ echo "$OUT" | grep -q "^table group_msg_table 5$" || { echo "FAIL: group_msg_tab
 echo "$OUT" | grep -q "^table c2c_msg_table 6$" || { echo "FAIL: c2c_msg_table" >&2; exit 1; }
 echo "$OUT" | grep -q "^wal_mode=none " || { echo "FAIL: wal_mode" >&2; exit 1; }
 
+echo "== locate / dump-page diagnostics =="
+# group_msg_table's root is a leaf holding rowids 1001..1003.
+LOC=$(./build/ntdbread-host --md5key "$MD5KEY" "$FIXTURE" --locate 1002)
+echo "$LOC"
+echo "$LOC" | grep -q "^page=5 source=main frame=0 type=0x0d ncells=3 depth=1" \
+    || { echo "FAIL: locate page" >&2; exit 1; }
+echo "$LOC" | grep -q "^keys: first=1001 last=1003$" \
+    || { echo "FAIL: locate keys" >&2; exit 1; }
+echo "$LOC" | grep -q "^badcells=0$" || { echo "FAIL: locate badcells" >&2; exit 1; }
+
+# messages is a two-level b-tree: the walk must cross an interior page (depth=2)
+# and land on the leaf whose rowid range brackets the key.
+LOC=$(./build/ntdbread-host --md5key "$MD5KEY" "$FIXTURE" --root 4 --locate 200)
+echo "$LOC"
+echo "$LOC" | grep -q "type=0x0d .* depth=2 " \
+    || { echo "FAIL: interior page not walked" >&2; exit 1; }
+echo "$LOC" | grep -q "^keys: first=199 last=220$" \
+    || { echo "FAIL: wrong leaf" >&2; exit 1; }
+
+DUMP=$(./build/ntdbread-host --md5key "$MD5KEY" "$FIXTURE" --dump-page 5)
+echo "$DUMP"
+echo "$DUMP" | grep -q "type=0x0d ncells=3 usable=4048" \
+    || { echo "FAIL: dump-page" >&2; exit 1; }
+
+# A body larger than the page spills into overflow pages; --locate must walk
+# that chain and report the head page rather than mis-declaring the cell bad.
+OVP="$(mktemp /tmp/ntdb-over-plain-XXXXXX.db)"
+OV="$(mktemp /tmp/ntdb-over-XXXXXX.db)"
+trap 'rm -f "$FIXTURE" "$OVP" "$OV"' EXIT
+python3 - "$OVP" "$OV" "$MD5KEY" <<'PYEOF'
+import sys
+sys.path.insert(0, "test")
+import synth
+synth.build_plain(sys.argv[1])
+synth.add_big_blobs(sys.argv[1], 2, 20000)
+with open(sys.argv[1], "rb") as f:
+    plain = f.read()
+synth.encrypt(plain, sys.argv[3], sys.argv[2])
+PYEOF
+OVL=$(./build/ntdbread-host --md5key "$MD5KEY" "$OV" --root 3 --locate 101)
+echo "$OVL"
+echo "$OVL" | grep -q "^overflow: cells=.* bad=0$" \
+    || { echo "FAIL: overflow chain reported bad" >&2; exit 1; }
+echo "$OVL" | grep -q "^target: rowid=101 payload=20[0-9][0-9][0-9] over_pgno=[1-9]" \
+    || { echo "FAIL: overflow head not followed" >&2; exit 1; }
+
 echo "== sql query =="
 ROWS=$(./build/ntdbread-host --md5key "$MD5KEY" "$FIXTURE" \
     "SELECT count(*) FROM messages WHERE length(body) > 0" 2>/dev/null)

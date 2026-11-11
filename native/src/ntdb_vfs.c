@@ -27,6 +27,7 @@ typedef struct {
     char *zPath; /* NT_DB: path, used to locate -wal */
     unsigned char *pages[NT_CACHE];
     sqlite3_int64 pageno[NT_CACHE];
+    unsigned int dbg_frame_slot[NT_CACHE]; /* WAL frame per cached page */
 
     /* NT_DB: our own WAL view (SQLite never sees the -wal file itself). */
     int wal_fd;
@@ -41,6 +42,9 @@ typedef struct {
     int wal_plain; /* mode 1: frames are stored unencrypted (QQ skips the WAL) */
     int wal_plain_votes; /* frames that look plain */
     int wal_enc_votes;   /* frames that decrypt to a valid page */
+
+    unsigned int dbg_frame; /* page source for diagnostics: 0 = main file */
+    long long usable_size;  /* page size minus reserved bytes (header byte 20) */
 
     unsigned char *mem; /* NT_MEM: journal / temp backing, RAM only */
     sqlite3_int64 mem_size;
@@ -426,8 +430,12 @@ static unsigned char *nt_db_page(nt_file *p, sqlite3_int64 pgno)
     int slot = (int)(pgno % NT_CACHE);
 
     if (pgno < 1 || pgno > nt_logical_pages(p)) return NULL;
-    if (p->pageno[slot] == pgno) return p->pages[slot];
+    if (p->pageno[slot] == pgno) {
+        p->dbg_frame = p->dbg_frame_slot[slot];
+        return p->pages[slot];
+    }
 
+    p->dbg_frame = 0;
     if (p->wal_map && pgno <= p->wal_map_cap && p->wal_map[pgno - 1] &&
         p->wal_fd >= 0) {
         /* Newest frame wins over the main file. */
@@ -436,6 +444,7 @@ static unsigned char *nt_db_page(nt_file *p, sqlite3_int64 pgno)
         sqlite3_int64 ofs = NT_WAL_HDR + (sqlite3_int64)(seq - 1) * NT_FRAME +
                             NT_FRAME_HDR;
         nt_pread(p->wal_fd, raw, NT_PAGE, ofs);
+        p->dbg_frame = seq;
         if (p->wal_mode == 1 && p->wal_plain) {
             memcpy(p->pages[slot], raw, NT_PAGE); /* unencrypted frames */
         } else {
@@ -452,7 +461,260 @@ static unsigned char *nt_db_page(nt_file *p, sqlite3_int64 pgno)
         return NULL;
     }
     p->pageno[slot] = pgno;
+    p->dbg_frame_slot[slot] = p->dbg_frame;
     return p->pages[slot];
+}
+
+/* ---- diagnostics: page access that bypasses SQLite's parser ---- */
+
+static void nt_file_release(nt_file *p); /* defined with the shared methods */
+
+/*
+ * SQLite's own varint: 1..9 bytes, **big-endian** (unlike protobuf's). The
+ * first byte holds the most significant 7 bits; a 9th byte carries a full 8.
+ */
+static int nt_varint_at(const unsigned char *b, size_t n, size_t *i,
+                        long long *v)
+{
+    unsigned long long x = 0;
+    int k = 0;
+
+    while (*i < n && k < 8) {
+        unsigned char c = b[(*i)++];
+        x = (x << 7) | (unsigned long long)(c & 0x7f);
+        k++;
+        if (!(c & 0x80)) {
+            *v = (long long)x;
+            return 0;
+        }
+    }
+    if (k == 8) {
+        if (*i >= n) return -1;
+        x = (x << 8) | b[(*i)++];
+        *v = (long long)x;
+        return 0;
+    }
+    return -1;
+}
+
+static unsigned int nt_be16(const unsigned char *p)
+{
+    return ((unsigned int)p[0] << 8) | p[1];
+}
+
+/* Opens a standalone nt_file for diagnostics (same key, same WAL merge). */
+static int nt_shadow_open(const char *path, nt_file *p)
+{
+    struct stat st;
+    unsigned char page[NT_PAGE], plain[NT_PAGE];
+    int i;
+
+    memset(p, 0, sizeof(*p));
+    p->fd = -1;
+    p->wal_fd = -1;
+    p->wal_disabled = g_no_wal;
+    p->fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (p->fd < 0) return -1;
+    if (fstat(p->fd, &st)) goto fail;
+    p->size = st.st_size;
+    if (p->size < NT_HEADER + NT_PAGE) goto fail;
+    nt_pread(p->fd, page, NT_PAGE, NT_HEADER);
+    nt_decrypt_page(0, page, plain);
+    if (!nt_header_plausible(plain)) goto fail;
+    p->usable_size = NT_PAGE - (long long)plain[20];
+    if (p->usable_size < NT_PAGE / 2 || p->usable_size > NT_PAGE)
+        p->usable_size = NT_PAGE - NT_RESERVE;
+    p->zPath = malloc(strlen(path) + 1);
+    if (!p->zPath) goto fail;
+    memcpy(p->zPath, path, strlen(path) + 1);
+    for (i = 0; i < NT_CACHE; i++) {
+        p->pageno[i] = -1;
+        p->pages[i] = malloc(NT_PAGE);
+        if (!p->pages[i]) goto fail;
+    }
+    return 0;
+fail:
+    nt_file_release(p);
+    return -1;
+}
+
+int nt_vfs_dump_page(const char *path, unsigned int pgno, unsigned char *page,
+                     unsigned int *frame, long long *usable)
+{
+    nt_file p;
+    const unsigned char *pg;
+    int rc = -1;
+
+    if (nt_shadow_open(path, &p)) return -1;
+    pg = nt_db_page(&p, pgno);
+    if (pg) {
+        memcpy(page, pg, NT_PAGE);
+        if (frame) *frame = p.dbg_frame;
+        if (usable) *usable = p.usable_size;
+        rc = 0;
+    }
+    nt_file_release(&p);
+    return rc;
+}
+
+int nt_vfs_locate(const char *path, unsigned int root, long long key,
+                  nt_locate_info *out)
+{
+    nt_file p;
+    unsigned int pgno = root;
+    int i;
+
+    memset(out, 0, sizeof(*out));
+    out->first_key = -1;
+    out->last_key = -1;
+    if (!root || nt_shadow_open(path, &p)) return -1;
+
+    for (i = 0; i < 32 && pgno; i++) {
+        const unsigned char *pg = nt_db_page(&p, pgno);
+        int type, ncells, hdr, k;
+
+        if (!pg) break;
+        out->pgno = pgno;
+        out->frame = p.dbg_frame;
+        out->type = type = pg[0];
+        out->ncells = ncells = (int)nt_be16(pg + 3);
+        out->usable = p.usable_size;
+
+        if (type == 0x05) { /* interior table page: cell = child ‖ rowid */
+            unsigned int right = nt_be32(pg + 8), next = right;
+            hdr = 12;
+            out->depth++;
+            for (k = 0; k < ncells; k++) {
+                unsigned int ofs = nt_be16(pg + hdr + 2 * k);
+                size_t ci = (size_t)ofs + 4;
+                long long cellkey;
+                if (ofs < (unsigned int)(hdr + 2 * ncells)
+                    || ofs + 4 >= (unsigned int)p.usable_size
+                    || nt_varint_at(pg, (size_t)p.usable_size, &ci,
+                                    &cellkey)) {
+                    out->bad_cells = 1;
+                    out->bad_cell = (unsigned int)k;
+                    out->bad_ofs = ofs;
+                    break;
+                }
+                if (cellkey >= key) {
+                    next = nt_be32(pg + ofs);
+                    break;
+                }
+            }
+            if (out->bad_cells) break;
+            pgno = next;
+            continue;
+        }
+        if (type != 0x0D) break; /* not a table leaf: report what we saw */
+
+        /* table leaf: cell = payload-size ‖ rowid ‖ payload */
+        hdr = 8;
+        out->depth++;
+        {
+        long long last_rowid = -1, last_payload = 0;
+        unsigned int last_over = 0, cell_over = 0;
+        for (k = 0; k < ncells; k++) {
+            unsigned int ofs = nt_be16(pg + hdr + 2 * k);
+            size_t ci;
+            long long payload, rowid, local, maxlocal, minlocal, need;
+
+            if (ofs < (unsigned int)(hdr + 2 * ncells)
+                || ofs + 2 >= (unsigned int)p.usable_size) {
+                out->bad_cells++;
+                if (out->bad_cells == 1) {
+                    out->bad_cell = (unsigned int)k;
+                    out->bad_ofs = ofs;
+                }
+                continue;
+            }
+            ci = ofs;
+            if (nt_varint_at(pg, (size_t)p.usable_size, &ci, &payload)
+                || nt_varint_at(pg, (size_t)p.usable_size, &ci, &rowid)) {
+                out->bad_cells++;
+                if (out->bad_cells == 1) {
+                    out->bad_cell = (unsigned int)k;
+                    out->bad_ofs = ofs;
+                }
+                continue;
+            }
+            maxlocal = p.usable_size - 35;
+            minlocal = (p.usable_size - 12) * 32 / 255 - 23;
+            if (payload <= maxlocal) local = payload;
+            else local = minlocal + (payload - minlocal) % (p.usable_size - 4);
+            need = (long long)(ci - ofs) + local;
+            if ((long long)ofs + need > p.usable_size) {
+                out->bad_cells++;
+                if (out->bad_cells == 1) {
+                    out->bad_cell = (unsigned int)k;
+                    out->bad_ofs = ofs;
+                    out->bad_payload = payload;
+                    out->bad_need = need;
+                }
+                continue;
+            }
+            if (k == 0) out->first_key = rowid;
+            out->last_key = rowid;
+
+            if (payload > local) {
+                /* Walk the overflow chain from this cell's head link. */
+                sqlite3_int64 limit = nt_logical_pages(&p);
+                unsigned int link = 0, ov;
+                long long at = (long long)ofs + need;
+
+                out->over_cells++;
+                ov = nt_be32(pg + at);
+                cell_over = ov;
+                if (rowid >= key && !out->target_found) {
+                    out->target_found = 1;
+                    out->target_rowid = rowid;
+                    out->target_payload = payload;
+                    out->target_over = ov;
+                    {
+                        /* Read it once to record where it lives. */
+                        const unsigned char *op = nt_db_page(&p, ov);
+                        out->target_frame = op ? p.dbg_frame : 0;
+                    }
+                }
+                while (ov) {
+                    if ((sqlite3_int64)ov < 1 || (sqlite3_int64)ov > limit) {
+                        out->over_bad++;
+                        out->over_bad_cell = (unsigned int)k;
+                        out->over_bad_pgno = ov;
+                        out->over_bad_link = link;
+                        break;
+                    }
+                    if (++out->over_pages > 4096) break; /* don't hang */
+                    {
+                        const unsigned char *op = nt_db_page(&p, ov);
+                        if (!op) break;
+                        ov = nt_be32(op);
+                    }
+                    link++;
+                }
+            } else if (rowid >= key && !out->target_found) {
+                out->target_found = 1;
+                out->target_rowid = rowid;
+                out->target_payload = payload;
+                out->target_over = 0;
+                cell_over = 0;
+            }
+            last_rowid = rowid;
+            last_payload = payload;
+            last_over = cell_over;
+        }
+        if (!out->target_found && last_rowid >= 0) {
+            /* key is past the end of this tree: report the final cell. */
+            out->target_found = 1;
+            out->target_rowid = last_rowid;
+            out->target_payload = last_payload;
+            out->target_over = last_over;
+        }
+        }
+        break;
+    }
+    nt_file_release(&p);
+    return 0;
 }
 
 static int ntDbRead(sqlite3_file *pFile, void *zBuf, int iAmt,
@@ -572,9 +834,8 @@ static int ntMemTruncate(sqlite3_file *pFile, sqlite3_int64 nByte)
 
 /* ---- shared methods ---- */
 
-static int ntClose(sqlite3_file *pFile)
+static void nt_file_release(nt_file *p)
 {
-    nt_file *p = (nt_file *)pFile;
     int i;
     if (p->fd >= 0) close(p->fd);
     if (p->wal_fd >= 0) close(p->wal_fd);
@@ -582,6 +843,17 @@ static int ntClose(sqlite3_file *pFile)
     free(p->zPath);
     free(p->wal_map);
     free(p->mem);
+    p->fd = -1;
+    p->wal_fd = -1;
+    p->zPath = NULL;
+    p->wal_map = NULL;
+    p->mem = NULL;
+}
+
+static int ntClose(sqlite3_file *pFile)
+{
+    nt_file *p = (nt_file *)pFile;
+    nt_file_release(p);
     p->base.pMethods = NULL;
     return SQLITE_OK;
 }
@@ -770,6 +1042,11 @@ static int ntOpen(sqlite3_vfs *pVfs, const char *zName, sqlite3_file *pFile,
                 p->base.pMethods = NULL;
                 return SQLITE_CANTOPEN;
             }
+            /* byte 20 = reserved bytes per page; SQLite's usable area ends
+             * there even though the crypto reserve is 48. */
+            p->usable_size = NT_PAGE - (long long)plain[20];
+            if (p->usable_size < NT_PAGE / 2 || p->usable_size > NT_PAGE)
+                p->usable_size = NT_PAGE - NT_RESERVE;
         }
         p->zPath = malloc(strlen(path) + 1);
         if (p->zPath) memcpy(p->zPath, path, strlen(path) + 1);

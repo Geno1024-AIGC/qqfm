@@ -211,6 +211,18 @@ def encrypt(plain: bytes, md5key: str, out: str) -> None:
 WAL_MARKER = "WAL-OVERLAY-9f3c"
 
 
+def add_big_blobs(path: str, count: int = 2, size: int = 20000) -> None:
+    """Appends blobs large enough to spill into overflow pages, so the locate
+    diagnostics have a real overflow chain to walk."""
+    con = sqlite3.connect(path)
+    con.executemany(
+        "INSERT INTO blobs(payload) VALUES (?)",
+        [(os.urandom(size),) for _ in range(count)],
+    )
+    con.commit()
+    con.close()
+
+
 def update_one_row(path: str) -> None:
     """Second revision of the data: one row body changes (and the header
     change counter), so the pages that differ become WAL frames."""

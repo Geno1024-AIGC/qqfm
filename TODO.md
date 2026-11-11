@@ -86,6 +86,16 @@ hex 的最后 3 个字符                                桶目录名
   （5 万行/块）：失败只丢当前块，重开库从 `last msgid` 续扫，已抽行全部保留；
   同一位置连续 3 次无进展才停，并把**已抽部分结果照常输出** + stderr 报
   resume point。一次性 SQL 查询仍是"缓冲 + 关库重开重试 3 次"。
+- **诊断工具（2026-11-11 记）**：`--locate N` 不经过 SQLite 解析器，自己从
+  `group_msg_table` 的 rootpage（可用 `--root` 覆盖）走 b-tree 到持有 rowid N 的叶子页，
+  报告 `page / source(main|wal) / frame / type / ncells / depth / usable`、该页
+  `first..last` rowid 以及越界单元格（`badcells` + 首个坏单元格的 offset/payload/need）；
+  同时沿每个大消息体的**溢出页链**走一遍，报告 `overflow: cells/pages/bad`（坏链给出
+  越界页号与链深）以及目标记录自己的 `payload / over_pgno / over_source(main|wal)`。
+  `--dump-page N` 直接输出解密后的页头字节。SQLite 判定 `malformed` 的页照样能看，
+  用于区分"主文件残页 / WAL 合并漏帧 / 解密错位 / 溢出页指针撕裂"几种根因。
+  **坑：SQLite 的 varint 是大端**（protobuf 是小端），第一版按小端解析导致
+  rowid/payload 全错、误报 `badcells`。
 - **`40800` 图片消息结构已实测（2026-11-11，真机样本 1448 B）**：
   外层 `f40800` 包消息体，图片元素（`f40010`=2）关键字段——
   `f45402`=文件名（md5 大写 + `.png`）、`f45405`=字节数、
