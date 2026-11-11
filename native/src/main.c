@@ -566,7 +566,7 @@ int main(int argc, char **argv)
     unsigned char key[32];
     sqlite3 *db = NULL;
     int no_wal = 0, kat_only = 0, pics = 0;
-    int locate = 0, dump = 0;
+    int locate = 0, dump = 0, full = 0;
     long long locate_key = 0;
     unsigned int dump_pgno = 0, root_pgno = 0;
     int i, rc;
@@ -590,6 +590,8 @@ int main(int argc, char **argv)
         } else if (strcmp(a, "--root") == 0) {
             if (++i >= argc) die("--root needs a page number");
             root_pgno = (unsigned int)strtoul(argv[i], NULL, 10);
+        } else if (strcmp(a, "--full") == 0) {
+            full = 1;
         } else if (strcmp(a, "--key") == 0) {
             if (++i >= argc) die("--key needs a value");
             keyhex = argv[i];
@@ -668,7 +670,7 @@ int main(int argc, char **argv)
                dump_pgno, frame ? "wal" : "main", frame, page[0],
                ((unsigned)page[3] << 8) | page[4], usable);
         printf("bytes: ");
-        dump_hex(page, 128);
+        dump_hex(page, full ? NT_PAGE : 128);
         return 0;
     }
     if (locate) {
@@ -697,6 +699,9 @@ int main(int argc, char **argv)
             die("cannot locate msgid %lld", locate_key);
 
         printf("locate msgid=%lld root=%u\n", locate_key, root_pgno);
+        printf("path:");
+        for (i = 0; i < li.path_len; i++) printf(" %u", li.path[i]);
+        printf("\n");
         printf("page=%u source=%s frame=%u type=0x%02x ncells=%d depth=%d "
                "usable=%lld\n",
                li.pgno, li.frame ? "wal" : "main", li.frame, li.type,

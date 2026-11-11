@@ -579,6 +579,8 @@ int nt_vfs_locate(const char *path, unsigned int root, long long key,
         out->type = type = pg[0];
         out->ncells = ncells = (int)nt_be16(pg + 3);
         out->usable = p.usable_size;
+        if (out->path_len < (int)(sizeof(out->path) / sizeof(out->path[0])))
+            out->path[out->path_len++] = pgno;
 
         if (type == 0x05) { /* interior table page: cell = child ‖ rowid */
             unsigned int right = nt_be32(pg + 8), next = right;
@@ -725,10 +727,18 @@ static int ntDbRead(sqlite3_file *pFile, void *zBuf, int iAmt,
     sqlite3_int64 start = iOfst;
     sqlite3_int64 end = iOfst + iAmt;
     unsigned char *dst = zBuf;
+    static int trace = -1;
 
+    if (trace < 0) {
+        const char *e = getenv("NTDB_TRACE_PAGES");
+        trace = (e && *e == '1');
+    }
     if (iAmt <= 0) return SQLITE_OK;
     if (iOfst < 0) return SQLITE_IOERR_READ;
     if (iOfst >= logical) {
+        if (trace)
+            fprintf(stderr, "vfs: read past eof at %lld (logical %lld)\n",
+                    (long long)iOfst, (long long)logical);
         memset(zBuf, 0, (size_t)iAmt);
         return SQLITE_IOERR_SHORT_READ;
     }
@@ -739,6 +749,9 @@ static int ntDbRead(sqlite3_file *pFile, void *zBuf, int iAmt,
         const unsigned char *page;
 
         if (chunk > iAmt) chunk = iAmt;
+        if (trace)
+            fprintf(stderr, "vfs: read pgno=%lld off=%d amt=%d\n",
+                    (long long)pgno, off, chunk);
         page = nt_db_page(p, pgno);
         if (page) memcpy(dst, page + off, (size_t)chunk);
         else memset(dst, 0, (size_t)chunk);

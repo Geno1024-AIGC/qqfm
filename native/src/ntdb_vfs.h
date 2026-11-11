@@ -85,6 +85,9 @@ typedef struct {
     long long target_payload;
     unsigned int target_over;  /* its first overflow page, 0 = all inline */
     unsigned int target_frame; /* its overflow head's WAL frame, 0 = main */
+    /* Pages visited on the way down, root first. */
+    int path_len;
+    unsigned int path[32];
 } nt_locate_info;
 
 int nt_vfs_locate(const char *path, unsigned int root, long long key,
