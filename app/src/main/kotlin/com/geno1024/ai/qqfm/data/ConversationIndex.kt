@@ -58,8 +58,15 @@ class ConversationIndex(context: Context) {
         var scanned = 0L
         var matched = 0
         var batch = 0
-        val statement = db.compileStatement(
-            "INSERT OR REPLACE INTO pic(md5, peer, msgid, sender) VALUES(?, ?, ?, ?)",
+        val insert = db.compileStatement(
+            "INSERT OR IGNORE INTO pic(md5, peer, msgid, sender) VALUES(?, ?, ?, ?)",
+        )
+        // The same picture is often forwarded into several conversations. The first
+        // message that carried it is the one the picture is "from", so a later row
+        // only replaces an earlier one when its msgid is older. Upsert syntax needs
+        // SQLite 3.24 and this app runs on 26, so the update is spelled out.
+        val replace = db.compileStatement(
+            "UPDATE pic SET peer = ?, msgid = ?, sender = ? WHERE md5 = ? AND msgid > ?",
         )
         try {
             db.beginTransaction()
@@ -67,11 +74,19 @@ class ConversationIndex(context: Context) {
                 NtdbTool.forEachPic(context, target) { row ->
                     scanned++
                     if (row.elem == 2 && row.md5 in needed) {
-                        statement.bindString(1, row.md5)
-                        statement.bindString(2, row.peer)
-                        statement.bindLong(3, row.msgid)
-                        statement.bindString(4, row.sender)
-                        statement.execute()
+                        insert.bindString(1, row.md5)
+                        insert.bindString(2, row.peer)
+                        insert.bindLong(3, row.msgid)
+                        insert.bindString(4, row.sender)
+                        // INSERT OR IGNORE reports -1 when the md5 is already there.
+                        if (insert.executeInsert() < 0) {
+                            replace.bindString(1, row.peer)
+                            replace.bindLong(2, row.msgid)
+                            replace.bindString(3, row.sender)
+                            replace.bindString(4, row.md5)
+                            replace.bindLong(5, row.msgid)
+                            replace.execute()
+                        }
                         matched++
                         // Commit every so often so a long scan survives the app
                         // being stopped, and so the gallery can read meanwhile.
@@ -89,7 +104,8 @@ class ConversationIndex(context: Context) {
                 runCatching { db.endTransaction() }
             }
         } finally {
-            statement.close()
+            insert.close()
+            replace.close()
         }
         onProgress(scanned, matched)
     }
