@@ -5,6 +5,9 @@ import java.io.File
 
 /**
  * A build stamp of the form `0.1.<env>.<pack>.<sha1>`.
+ *
+ * [env] is the commit count, [pack] the number of packaging runs and [sha1] the short
+ * commit id. Only [env] is ordered — see [Versioning.env].
  */
 data class Stamp(
     val env: String,
@@ -40,9 +43,18 @@ object Versioning {
         sha1 = sha1(root),
     )
 
+    /**
+     * The build's position in the stream: the number of commits on the branch.
+     *
+     * This has to be the same quantity on the developer's machine and on CI, or the
+     * two stamps cannot be ordered: the run number restarts with the workflow and sat
+     * below the commit count, so every CI build looked *older* than the last local one
+     * and `versionCode` went backwards. The run number is only a fallback for a
+     * checkout without history (`fetch-depth: 0` keeps it intact on CI).
+     */
     fun env(root: File): String =
-        System.getenv("GITHUB_RUN_NUMBER")
-            ?: git(root, "rev-list", "--count", "HEAD")
+        git(root, "rev-list", "--count", "HEAD")
+            ?: System.getenv("GITHUB_RUN_NUMBER")
             ?: "0"
 
     fun sha1(root: File): String =

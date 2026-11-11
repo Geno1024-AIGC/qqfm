@@ -33,13 +33,14 @@ object Updater {
     /**
      * A build stamp: `0.1.<env>.<pack>.<sha>`.
      *
-     * [env] is the CI run number and [pack] the number of packaging runs, both
-     * monotonic within a stream, so ordering is by those two. [sha] identifies the
-     * commit and is deliberately not part of the comparison: it is a name, not a number.
+     * [env] is the commit count and [pack] the number of packaging runs. Ordering uses
+     * [env] alone: both numbers are restarted by different events, but the commit count
+     * only grows, while `pack` grows on every local rebuild of the same commit — letting
+     * it vote would make a local build always look newer than the CI build of the same
+     * commit. [sha] identifies the commit and is a name, not a number.
      */
     class Version(val env: Int, val pack: Int, val sha: String) : Comparable<Version> {
-        override fun compareTo(other: Version): Int =
-            compareValuesBy(this, other, Version::env, Version::pack)
+        override fun compareTo(other: Version): Int = env.compareTo(other.env)
 
         override fun equals(other: Any?): Boolean =
             other is Version && env == other.env && pack == other.pack && sha == other.sha
