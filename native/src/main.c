@@ -424,99 +424,124 @@ static int run_sql(sqlite3 *db, const char *sql, nt_buf *out,
 }
 
 /*
- * Streams one message table, keeping only bodies that carry an md5. Missing
- * tables are skipped (not every nt_msg.db has both), missing columns fail the
- * query like anywhere else.
+ * Streams message bodies carrying an md5 in resumable msgid chunks. A torn
+ * page aborts the call with the sqlite error code while st->last already
+ * points past every row that made it into out; the caller then reopens the
+ * database and calls again, so a live writer costs one chunk of latency,
+ * never the whole run.
  */
-static int run_pics(sqlite3 *db, const char *table, nt_buf *out,
-                    char *emsg, size_t emsglen, int *prows, int *pmatches)
+struct pics_run {
+    int table;             /* index into pics_tables */
+    int tstate[2];         /* 0 unchecked, 1 absent, 2 present */
+    long long last;        /* resume point: emit rows with msgid > last */
+    int rows, matches;
+};
+
+static const char *pics_tables[] = {"group_msg_table", "c2c_msg_table"};
+#define PICS_TABLES ((int)(sizeof(pics_tables) / sizeof(pics_tables[0])))
+#define PICS_CHUNK 50000
+
+/* Chunk size; NTDB_PICS_CHUNK overrides it so the offline test can cross a
+ * chunk boundary inside a 3-row fixture. */
+static int pics_chunk(void)
 {
-    static const char *sqlfmt =
-        "SELECT \"40001\", \"40011\", \"40020\", \"40800\" FROM \"%s\"";
-    sqlite3_stmt *st = NULL, *chk = NULL;
-    char sql[192];
-    int rc, rows = 0, matches = 0;
-
-    *prows = 0;
-    *pmatches = 0;
-
-    rc = sqlite3_prepare_v2(db,
-                            "SELECT 1 FROM sqlite_master WHERE type='table' "
-                            "AND name=?;",
-                            -1, &chk, NULL);
-    if (rc == SQLITE_OK) {
-        int found;
-        sqlite3_bind_text(chk, 1, table, -1, SQLITE_STATIC);
-        found = sqlite3_step(chk) == SQLITE_ROW;
-        sqlite3_finalize(chk);
-        if (!found) return SQLITE_OK;
-    }
-
-    snprintf(sql, sizeof(sql), sqlfmt, table);
-    rc = sqlite3_prepare_v2(db, sql, -1, &st, NULL);
-    if (rc != SQLITE_OK) {
-        snprintf(emsg, emsglen, "%s: prepare failed: %s", table,
-                 sqlite3_errmsg(db));
-        return rc;
-    }
-    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
-        struct pic_info p;
-        const unsigned char *blob = sqlite3_column_blob(st, 3);
-        int n = sqlite3_column_bytes(st, 3);
-
-        rows++;
-        if ((rows % 200000) == 0)
-            fprintf(stderr, "ntdbread: %s scanned=%d media=%d\n", table, rows,
-                    matches);
-        if (!blob || n <= 0) continue;
-        if (!scan_blob(blob, (size_t)n, &p)) continue;
-        matches++;
-
-        buf_add(out, "%s\t%lld\t", table,
-                (long long)sqlite3_column_int64(st, 0));
-        if (sqlite3_column_type(st, 1) != SQLITE_NULL)
-            buf_add(out, "%lld", (long long)sqlite3_column_int64(st, 1));
-        buf_add(out, "\t");
-        if (sqlite3_column_type(st, 2) != SQLITE_NULL) {
-            const unsigned char *text = sqlite3_column_text(st, 2);
-            int tn = sqlite3_column_bytes(st, 2), j;
-            for (j = 0; j < tn; j++) {
-                char c = (char)text[j];
-                if (c == '\t' || c == '\n' || c == '\r') c = ' ';
-                buf_add(out, "%c", c);
-            }
-        }
-        buf_add(out, "\t%lld\t%s\t%s\t%lld\n", p.elem, p.md5, p.name, p.size);
-    }
-    if (rc == SQLITE_DONE) rc = SQLITE_OK;
-    if (rc != SQLITE_OK)
-        snprintf(emsg, emsglen, "%s: step failed: %s", table,
-                 sqlite3_errmsg(db));
-    sqlite3_finalize(st);
-    if (rc == SQLITE_OK) {
-        *prows = rows;
-        *pmatches = matches;
-    }
-    return rc;
+    const char *e = getenv("NTDB_PICS_CHUNK");
+    int n = e ? atoi(e) : 0;
+    return (n > 0 && n <= 1000000) ? n : PICS_CHUNK;
 }
 
-static int run_pics_all(sqlite3 *db, nt_buf *out, char *emsg, size_t emsglen,
-                        int *prows, int *pmatches)
+static int run_pics_resume(sqlite3 *db, struct pics_run *st, nt_buf *out,
+                           char *emsg, size_t emsglen)
 {
-    static const char *tables[] = {"group_msg_table", "c2c_msg_table"};
-    size_t i;
-    int rc;
+    char sql[256];
 
-    buf_add(out, "table\tmsgid\tcol40011\tcol40020\telem\tmd5\tfilename"
-                 "\tsize\n");
-    *prows = 0;
-    *pmatches = 0;
-    for (i = 0; i < sizeof(tables) / sizeof(tables[0]); i++) {
-        int rows = 0, matches = 0;
-        rc = run_pics(db, tables[i], out, emsg, emsglen, &rows, &matches);
-        *prows += rows;
-        *pmatches += matches;
-        if (rc != SQLITE_OK) return rc;
+    if (out->len == 0)
+        buf_add(out, "table\tmsgid\tcol40011\tcol40020\telem\tmd5\tfilename"
+                     "\tsize\n");
+
+    while (st->table < PICS_TABLES) {
+        const char *table = pics_tables[st->table];
+        sqlite3_stmt *q = NULL;
+        int rc, chunk_rows = 0, chunk = pics_chunk();
+
+        if (st->tstate[st->table] == 0) {
+            sqlite3_stmt *chk = NULL;
+            if (sqlite3_prepare_v2(db,
+                                   "SELECT 1 FROM sqlite_master "
+                                   "WHERE type='table' AND name=?;",
+                                   -1, &chk, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(chk, 1, table, -1, SQLITE_STATIC);
+                st->tstate[st->table] =
+                    sqlite3_step(chk) == SQLITE_ROW ? 2 : 1;
+                sqlite3_finalize(chk);
+            } else {
+                st->tstate[st->table] = 2; /* the real query reports why */
+            }
+        }
+        if (st->tstate[st->table] == 1) {
+            st->table++;
+            st->last = -1;
+            continue;
+        }
+
+        /* "40001" is the rowid-aliased primary key, so this seeks. */
+        snprintf(sql, sizeof(sql),
+                 "SELECT \"40001\", \"40011\", \"40020\", \"40800\" "
+                 "FROM \"%s\" WHERE \"40001\" > ? "
+                 "ORDER BY \"40001\" LIMIT %d",
+                 table, chunk);
+        rc = sqlite3_prepare_v2(db, sql, -1, &q, NULL);
+        if (rc != SQLITE_OK) {
+            snprintf(emsg, emsglen, "%s: prepare failed: %s", table,
+                     sqlite3_errmsg(db));
+            return rc;
+        }
+        sqlite3_bind_int64(q, 1, st->last);
+
+        while ((rc = sqlite3_step(q)) == SQLITE_ROW) {
+            struct pic_info p;
+            const unsigned char *blob = sqlite3_column_blob(q, 3);
+            int n = sqlite3_column_bytes(q, 3);
+
+            st->last = sqlite3_column_int64(q, 0);
+            st->rows++;
+            chunk_rows++;
+            if ((st->rows % 200000) == 0)
+                fprintf(stderr, "ntdbread: %s scanned=%d media=%d\n", table,
+                        st->rows, st->matches);
+            if (!blob || n <= 0) continue;
+            if (!scan_blob(blob, (size_t)n, &p)) continue;
+            st->matches++;
+
+            buf_add(out, "%s\t%lld\t", table, st->last);
+            if (sqlite3_column_type(q, 1) != SQLITE_NULL)
+                buf_add(out, "%lld", (long long)sqlite3_column_int64(q, 1));
+            buf_add(out, "\t");
+            if (sqlite3_column_type(q, 2) != SQLITE_NULL) {
+                const unsigned char *text = sqlite3_column_text(q, 2);
+                int tn = sqlite3_column_bytes(q, 2), j;
+                for (j = 0; j < tn; j++) {
+                    char c = (char)text[j];
+                    if (c == '\t' || c == '\n' || c == '\r') c = ' ';
+                    buf_add(out, "%c", c);
+                }
+            }
+            buf_add(out, "\t%lld\t%s\t%s\t%lld\n", p.elem, p.md5, p.name,
+                    p.size);
+        }
+        if (rc == SQLITE_DONE) rc = SQLITE_OK;
+        if (rc != SQLITE_OK) {
+            snprintf(emsg, emsglen, "%s: step failed at msgid>%lld: %s", table,
+                     st->last, sqlite3_errmsg(db));
+            sqlite3_finalize(q);
+            return rc;
+        }
+        sqlite3_finalize(q);
+
+        if (chunk_rows < chunk) { /* short chunk: table exhausted */
+            st->table++;
+            st->last = -1;
+        }
     }
     return SQLITE_OK;
 }
@@ -608,23 +633,33 @@ int main(int argc, char **argv)
     {
         nt_buf out = {NULL, 0, 0};
         char emsg[256] = "";
-        int attempt, rows = 0, matches = 0, open_failed = 0;
+        struct pics_run prun;
+        int attempt = 0, rows = 0, open_failed = 0;
+        int fails = 0, prev_table = 0;
+        long long prev_last = -1;
+
+        memset(&prun, 0, sizeof(prun));
+        prun.last = -1;
 
         rc = SQLITE_ERROR;
-        for (attempt = 0; attempt < 3; attempt++) {
-            if (attempt) {
+        for (;;) {
+            attempt++;
+            if (attempt > 1) {
                 /* QQ may be mid-write; give it a moment, then take a new
                  * snapshot with freshly opened files. */
                 struct timespec ts;
                 ts.tv_sec = 0;
-                ts.tv_nsec = 300000000L * attempt;
+                ts.tv_nsec = 300000000L * (attempt > 4 ? 4 : attempt - 1);
                 nanosleep(&ts, NULL);
                 fprintf(stderr, "ntdbread: transient failure (%s), retrying\n",
                         emsg);
             }
-            out.len = 0; /* discard any partial rows from a torn read */
-            rows = 0;
-            matches = 0;
+            if (!pics) {
+                out.len = 0; /* one-shot queries discard partial rows */
+                rows = 0;
+            }
+            prev_table = prun.table;
+            prev_last = prun.last;
             open_failed = 0;
             rc = sqlite3_open_v2(dbpath, &db, SQLITE_OPEN_READONLY, NULL);
             if (rc != SQLITE_OK) {
@@ -639,8 +674,7 @@ int main(int argc, char **argv)
                 /* No spill to disk: temp files would only add writes. */
                 sqlite3_exec(db, "PRAGMA temp_store=MEMORY;", NULL, NULL, NULL);
                 if (pics)
-                    rc = run_pics_all(db, &out, emsg, sizeof(emsg), &rows,
-                                      &matches);
+                    rc = run_pics_resume(db, &prun, &out, emsg, sizeof(emsg));
                 else if (sql)
                     rc = run_sql(db, sql, &out, emsg, sizeof(emsg), &rows);
                 else
@@ -650,6 +684,22 @@ int main(int argc, char **argv)
                 db = NULL;
             }
             if (!transient(rc)) break;
+            if (pics) {
+                if (prun.table != prev_table || prun.last != prev_last) {
+                    fails = 0; /* new ground covered — keep going */
+                } else if (++fails >= 3) {
+                    fprintf(stderr,
+                            "ntdbread: no progress after 3 attempts, stopping "
+                            "at table=%s msgid>%lld\n",
+                            prun.table < PICS_TABLES
+                                ? pics_tables[prun.table]
+                                : "?",
+                            prun.last);
+                    break;
+                }
+            } else if (attempt >= 3) {
+                break;
+            }
         }
 
         if (rc != SQLITE_OK) {
@@ -672,6 +722,14 @@ int main(int argc, char **argv)
                             "header — wrong key or geometry\n");
                 }
             }
+            if (pics) {
+                /* whatever was extracted is still useful — hand it over */
+                fwrite(out.p, 1, out.len, stdout);
+                fprintf(stderr,
+                        "ntdbread: partial list: %d media rows, resume point "
+                        "table=%d msgid>%lld\n",
+                        prun.matches, prun.table, prun.last);
+            }
             free(out.p);
             if (db) sqlite3_close(db);
             return 1;
@@ -680,7 +738,8 @@ int main(int argc, char **argv)
         fwrite(out.p, 1, out.len, stdout);
         free(out.p);
         if (pics)
-            fprintf(stderr, "ntdbread: scanned=%d media=%d\n", rows, matches);
+            fprintf(stderr, "ntdbread: scanned=%d media=%d\n", prun.rows,
+                    prun.matches);
         else if (sql)
             fprintf(stderr, "ntdbread: rows=%d\n", rows);
         sqlite3_close(db);

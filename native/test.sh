@@ -63,6 +63,41 @@ echo "$PICS" | grep -q "0123456789abcdef0123456789abcdef" \
     && { echo "FAIL: noise md5 extracted" >&2; exit 1; }
 true
 
+echo "== pics chunked scan =="
+# chunk size 2 forces the fixture's 3 group rows across two chunks; the
+# result must be byte-identical to the single-chunk scan above.
+CHUNKED=$(NTDB_PICS_CHUNK=2 ./build/ntdbread-host --md5key "$MD5KEY" \
+    "$FIXTURE" --pics 2>/dev/null)
+[ "$CHUNKED" = "$PICS" ] || { echo "FAIL: chunked scan differs" >&2; exit 1; }
+
+echo "== pics torn read keeps partial output =="
+TORN="$(mktemp /tmp/ntdb-torn-XXXXXX.db)"
+TORNERR="$(mktemp /tmp/ntdb-torn-err-XXXXXX)"
+cp "$FIXTURE" "$TORN"
+python3 - "$TORN" <<'PYEOF'
+import sys
+# flip the group_msg_table root leaf (rootpage 5) b-tree header
+with open(sys.argv[1], "r+b") as f:
+    pos = 1024 + (5 - 1) * 4096 + 8
+    f.seek(pos)
+    b = f.read(64)
+    f.seek(pos)
+    f.write(bytes(x ^ 0xFF for x in b))
+PYEOF
+if TORNOUT=$(./build/ntdbread-host --md5key "$MD5KEY" "$TORN" --pics \
+        2>"$TORNERR"); then
+    echo "FAIL: corrupted fixture accepted" >&2
+    exit 1
+fi
+echo "stderr: $(tr '\n' '|' < "$TORNERR")"
+grep -q "no progress after 3 attempts" "$TORNERR" \
+    || { echo "FAIL: no give-up message" >&2; exit 1; }
+grep -q "partial list" "$TORNERR" \
+    || { echo "FAIL: no partial-list message" >&2; exit 1; }
+[ "$(printf '%s\n' "$TORNOUT" | wc -l)" -eq 1 ] \
+    || { echo "FAIL: expected header only on stdout" >&2; exit 1; }
+rm -f "$TORN" "$TORNERR"
+
 echo "== wrong key is rejected =="
 if ./build/ntdbread-host --md5key ffffffffffffffffffffffffffffffff "$FIXTURE" \
     >/dev/null 2>&1; then
