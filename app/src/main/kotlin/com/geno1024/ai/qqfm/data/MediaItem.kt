@@ -3,9 +3,12 @@ package com.geno1024.ai.qqfm.data
 /**
  * One entry of QQ's media cache.
  *
- * The user browses one tree at a time: NTQQ names a picture after
- * `crc64("<tree>:<md5>")`, so the same picture carries a different id in every
- * tree and the trees cannot be matched by name.
+ * The user browses one tree at a time: NTQQ names a downloaded picture after a
+ * random 64-bit id it makes at download time, so the same picture carries an
+ * unrelated name in every tree (`chatimg`, `chatraw`, `chatthumb` never share
+ * one) and the trees cannot be matched by name. What does match is the bytes:
+ * `chatraw` keeps the picture as it was sent, so its content md5 is the md5 on
+ * the message.
  */
 data class MediaItem(
     val source: MediaSource,
@@ -23,19 +26,16 @@ data class MediaItem(
     /**
      * Where rendering may look for a preview, best first.
      *
-     * Pictures have a separate `chatthumb` tree. Videos may have a sibling thumbnail
-     * tree, but its naming rule is not stable across QQ versions, so a few common
-     * shapes are tried and a missing thumbnail simply falls back to a placeholder.
+     * A video's thumbnail is a separate file, resolved while scanning. Pictures
+     * have no separate small copy to reach for: `chatthumb` names its files
+     * independently of `chatimg`/`chatraw`, so there is nothing to look up and
+     * the picture itself is the only candidate.
      */
     val thumbnailCandidates: List<String>
-        get() = when {
-            source == MediaSource.THUMB || source == MediaSource.VIDEO_THUMB -> listOf(path)
-            source == MediaSource.VIDEO -> listOfNotNull(previewPath)
-            else -> listOf(
-                MediaPaths.pathIn(MediaPaths.THUMB_DIR, "Cache_${base}_hd"),
-                MediaPaths.pathIn(MediaPaths.THUMB_DIR, "Cache_${base}"),
-                path,
-            )
+        get() = when (source) {
+            MediaSource.THUMB, MediaSource.VIDEO_THUMB -> listOf(path)
+            MediaSource.VIDEO -> listOfNotNull(previewPath)
+            else -> listOf(path)
         }
 }
 

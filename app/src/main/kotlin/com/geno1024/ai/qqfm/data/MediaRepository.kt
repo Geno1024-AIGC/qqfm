@@ -186,10 +186,11 @@ class MediaRepository(
     /**
      * Deletes exactly the files the caller is looking at, and nothing else.
      *
-     * The three trees cannot be lined up by name — NTQQ names each tree's copy of a
-     * picture `crc64("<tree>:<md5>")` — so guessing at siblings would be a guess, and
-     * deleting a file from a directory the user is not browsing is not theirs to ask
-     * for. One picture, one file.
+     * The three trees cannot be lined up by name — NTQQ names each tree's copy of
+     * a picture after its own random id, so no file here is known to be a copy of
+     * another — so guessing at siblings would be a guess, and deleting a file from
+     * a directory the user is not browsing is not theirs to ask for. One picture,
+     * one file.
      */
     fun delete(items: List<MediaItem>, onProgress: (Int) -> Unit = {}): DeleteResult {
         if (items.isEmpty()) return DeleteResult(0L, 0L)
