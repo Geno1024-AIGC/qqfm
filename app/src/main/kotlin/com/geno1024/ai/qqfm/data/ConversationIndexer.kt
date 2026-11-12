@@ -4,18 +4,20 @@ import android.content.Context
 
 /**
  * Builds "which conversation is this picture from" out of the two things that can
- * be read on the device: the bytes of `chatraw` and the message database.
+ * be read on the device: the bytes of the pictures and the message database.
  *
- * The chain has four links, each a separate slow pass:
+ * The chain has five links, each a separate slow pass:
  *
  *  1. hash `chatraw` — its files keep the bytes that were sent, so their md5 is the
- *     md5 the message carries (measured: 56.6% of the tree, the rest are pictures the
- *     user never sent or that QQ re-encoded on the way in);
- *  2. stream every media element out of `nt_msg.db` and keep the rows whose md5
- *     the device actually has;
- *  3. read `files_in_chat.db`, QQ's own record of files it handled, which is a second
+ *     md5 the message carries (measured: 55.6% of the tree, the rest are pictures
+ *     the user never sent or that QQ re-encoded on the way in);
+ *  2. scan `chatimg` and `chatthumb` for their file names, which are derived from
+ *     the picture's md5 rather than from its bytes;
+ *  3. stream every media element out of `nt_msg.db` and keep the rows that lead to
+ *     a file the device has, by md5 or by derived name;
+ *  4. read `files_in_chat.db`, QQ's own record of files it handled, which is a second
  *     md5 → conversation map covering the pictures the message scan does not;
- *  4. read conversation names out of QQ's own group and profile databases.
+ *  5. read conversation names out of QQ's own group and profile databases.
  *
  * Only the pictures that exist locally are stored, so the index stays at a few
  * megabytes instead of the two million plus message rows.
@@ -32,6 +34,7 @@ class ConversationIndexer(
     sealed interface Phase {
         data object Locating : Phase
         data class Hashing(val done: Int, val total: Int) : Phase
+        data object ReadingTrees : Phase
         data class ReadingMessages(val scanned: Long, val matched: Int) : Phase
         data class ReadingFiles(val scanned: Long, val matched: Int) : Phase
         data object Naming : Phase
@@ -46,6 +49,8 @@ class ConversationIndexer(
         val indexed: Int,
         /** Links stored from a message that named its own cache file. */
         val named: Int,
+        /** Links stored because QQ named an `chatimg`/`chatthumb` copy after the md5. */
+        val fromNames: Int,
         /** Links only the file table knew. */
         val fromFiles: Int,
         val conversations: Int,
@@ -69,8 +74,6 @@ class ConversationIndexer(
         val target = NtdbTool.target()
             ?: return Outcome.Failed("找不到 QQ 的消息数据库（需要 root 权限）")
 
-        // The tree the messages can be matched against; if it was never scanned the
-        // scan writes the cache itself, which costs seconds against 116k files.
         val items = repository.loadCached(MediaSource.RAW)
             ?: repository.scan(MediaSource.RAW).items
         if (items.isEmpty()) return Outcome.Failed("chatraw 里没有图片")
@@ -85,18 +88,19 @@ class ConversationIndexer(
         val needed = items.mapNotNullTo(HashSet()) { item -> cache[item.base]?.md5 }
         if (needed.isEmpty()) return Outcome.Failed("还没有任何图片的 md5 可对上消息")
 
-        // Every cache name on the device, so a message's own path can be trusted.
-        // The other trees are only read if they were already scanned: making the
-        // user wait through two more walks to use this route would cost more than
-        // it gives back.
-        val localBases = HashSet<String>(200_000)
+        // Every cache name on the device. `chatraw` is needed for the path route and
+        // the other two trees for the derived-name route, so all three are scanned
+        // once and cached; a picture the gallery cannot show is a link not worth
+        // storing.
+        onPhase(Phase.ReadingTrees)
+        val localBases = HashSet<String>(400_000)
         items.mapTo(localBases) { it.base }
-        listOf(MediaSource.IMG, MediaSource.THUMB).forEach { source ->
-            repository.loadCached(source)?.mapTo(localBases) { it.base }
+        CacheName.TREES.forEach { source ->
+            val tree = repository.loadCached(source) ?: repository.scan(source).items
+            tree.mapTo(localBases) { it.base }
         }
-
         val matched = intArrayOf(0)
-        conversations.rebuildFrom(target, needed, localBases, context) { scanned, found ->
+        val filed = conversations.rebuildFrom(target, needed, localBases, context) { scanned, found ->
             matched[0] = found
             onPhase(Phase.ReadingMessages(scanned, found))
         }
@@ -111,15 +115,16 @@ class ConversationIndexer(
         }
 
         onPhase(Phase.Naming)
-        val peers = conversations.peers().map { it.first }
-        conversations.namePeers(target, context, peers)
+        val peers = conversations.peers()
+        conversations.namePeers(target, context, peers.map { it.first })
 
         return Outcome.Done(
             Result(
                 files = items.size,
                 hashed = needed.size,
-                indexed = matched[0] + conversations.fileOnlyCount(),
-                named = conversations.namedCount(),
+                indexed = peers.sumOf { it.second },
+                named = filed.fromPath,
+                fromNames = filed.fromMd5,
                 fromFiles = conversations.fileOnlyCount(),
                 conversations = peers.size,
             ),
@@ -148,9 +153,10 @@ class ConversationIndexer(
             out[base] = Conversation(peer, name)
         }
 
-        // The name route covers pictures sent from this phone (any tree); the md5
-        // route covers everything else that `chatraw` kept. Where both know a base,
-        // the named one is the direct statement, so it wins.
+        // The name routes cover `chatimg`/`chatthumb` (both the copies a message
+        // named itself and the ones QQ named after the md5); the md5 route covers
+        // what `chatraw` kept. Where both know a base, the named one is the direct
+        // statement, so it wins.
         conversations.allNamed().forEach { (base, peer) -> put(base, peer) }
         val peers = conversations.allPeers()
         if (peers.isNotEmpty()) {

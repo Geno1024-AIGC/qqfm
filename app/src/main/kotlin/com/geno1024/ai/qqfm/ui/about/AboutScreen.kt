@@ -463,6 +463,7 @@ fun AboutScreen(
                                     val r = outcome.result
                                     "✅ chatraw ${r.files} 张，算出 md5 ${r.hashed} 张；" +
                                         "对上会话 ${r.indexed} 张（文件库补充 ${r.fromFiles} 张、" +
+                                        "图片/缩略图按文件名 ${r.fromNames} 条、" +
                                         "消息自带路径 ${r.named} 条），分布在 ${r.conversations} 个会话"
                                 }
                             }
@@ -501,6 +502,7 @@ fun AboutScreen(
 /** One line describing what the index build is doing, for the debug card. */
 private fun phaseLabel(phase: ConversationIndexer.Phase): String = when (phase) {
     ConversationIndexer.Phase.Locating -> "正在定位消息数据库…"
+    ConversationIndexer.Phase.ReadingTrees -> "正在清点图片与缩略图缓存…"
     ConversationIndexer.Phase.Naming -> "正在读取会话名称…"
     is ConversationIndexer.Phase.Hashing ->
         if (phase.total == 0) {

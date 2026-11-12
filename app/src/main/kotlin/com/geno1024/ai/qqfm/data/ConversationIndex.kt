@@ -34,20 +34,29 @@ class ConversationIndex(context: Context) {
         }
     }
 
+    /** What the two name routes filed, for the report on the about page. */
+    data class Filed(val fromPath: Int, val fromMd5: Int)
+
     /**
      * Rebuilds the index from a live scan of the message database.
      *
-     * Two routes, because QQ records two different things:
+     * Three routes, because QQ records three different things:
      *
      *  - [needed] md5s: the bytes of `chatraw` are the bytes that were sent, so a
      *    picture there matches the message's own md5. Every element type is accepted
      *    rather than only pictures: the md5 is of the file's bytes, and `needed` only
      *    holds files that exist in `chatraw`, so a video or voice row can never match
      *    one, while an image QQ filed under another type still can.
-     *  - [localBases]: a message the user sent from this phone carries the local
-     *    cache path it wrote (`f45403`, `::NTOSFull::…/Cache_<id>`). That name is
-     *    only usable when the file exists here — another sender's path names a file
-     *    on their phone — so it is checked against the cache before it is stored.
+     *  - [localBases] by path: a message the user sent from this phone carries the
+     *    local cache path it wrote (`f45403`, `::NTOSFull::…/Cache_<id>`). That name
+     *    is only usable when the file exists here — another sender's path names a
+     *    file on their phone — so it is checked against the cache before storing.
+     *  - [localBases] by derived name: every tree names its files after the
+     *    picture's original md5 ([CacheName]), so `chatimg` and `chatthumb` copies
+     *    are reachable even though QQ re-encoded them and their bytes no longer
+     *    hash to that md5. This is the wide route: on a real library it links 81,997
+     *    `chatimg` and 86,754 `chatthumb` files that the md5 route cannot see at
+     *    all, because those pictures were never downloaded as originals.
      *
      * Pairs are filed under the earliest message that carried them: a picture is
      * "from" the conversation it first appeared in, not the latest forward.
@@ -58,7 +67,7 @@ class ConversationIndex(context: Context) {
         localBases: Set<String>,
         context: Context,
         onProgress: (scanned: Long, matched: Int) -> Unit = { _, _ -> },
-    ) {
+    ): Filed {
         val db = helper.writableDatabase
         db.beginTransaction()
         try {
@@ -97,6 +106,28 @@ class ConversationIndex(context: Context) {
             }
         }
 
+        /** Files [base] under [peer]; true when that is a name the index did not have. */
+        fun name(base: String, peer: String, msgid: Long): Boolean {
+            insertNamed.bindString(1, base)
+            insertNamed.bindString(2, peer)
+            insertNamed.bindLong(3, msgid)
+            // INSERT OR IGNORE reports -1 when the name is already there.
+            if (insertNamed.executeInsert() >= 0) {
+                bumpBatch()
+                return true
+            }
+            replaceNamed.bindString(1, peer)
+            replaceNamed.bindLong(2, msgid)
+            replaceNamed.bindString(3, base)
+            replaceNamed.bindLong(4, msgid)
+            replaceNamed.execute()
+            bumpBatch()
+            return false
+        }
+
+        var fromPath = 0
+        var fromMd5 = 0
+
         try {
             db.beginTransaction()
             try {
@@ -124,18 +155,31 @@ class ConversationIndex(context: Context) {
                     // is 3 on these, so this is deliberately outside the check above.
                     val base = row.path?.substringAfterLast('/', "")?.removePrefix("Cache_")
                     if (!base.isNullOrEmpty() && base in localBases) {
-                        insertNamed.bindString(1, base)
-                        insertNamed.bindString(2, row.peer)
-                        insertNamed.bindLong(3, row.msgid)
-                        if (insertNamed.executeInsert() < 0) {
-                            replaceNamed.bindString(1, row.peer)
-                            replaceNamed.bindLong(2, row.msgid)
-                            replaceNamed.bindString(3, base)
-                            replaceNamed.bindLong(4, row.msgid)
-                            replaceNamed.execute()
-                        }
+                        if (name(base, row.peer, row.msgid)) fromPath++
                         matched++
-                        bumpBatch()
+                    }
+
+                    // The copy in `chatimg`/`chatthumb` is a re-encoding, so its bytes
+                    // no longer hash to the message's md5 — but QQ named it after that
+                    // md5 anyway, so the name still leads back to the conversation.
+                    // Only names that exist on this device are filed, which keeps the
+                    // table at what the gallery can actually show.
+                    for (tree in CacheName.TREES) {
+                        val derived = CacheName.of(tree, row.md5) ?: continue
+                        if (derived in localBases) {
+                            if (name(derived, row.peer, row.msgid)) fromMd5++
+                            matched++
+                        }
+                        // Most thumbnails are written with an `_hd` suffix, and that
+                        // is a separate file with its own name, so it needs its own
+                        // row. `chatimg` never uses the suffix.
+                        if (tree == MediaSource.THUMB) {
+                            val hd = derived + "_hd"
+                            if (hd in localBases) {
+                                if (name(hd, row.peer, row.msgid)) fromMd5++
+                                matched++
+                            }
+                        }
                     }
 
                     if (scanned % 20_000 == 0L) onProgress(scanned, matched)
@@ -151,6 +195,7 @@ class ConversationIndex(context: Context) {
             replaceNamed.close()
         }
         onProgress(scanned, matched)
+        return Filed(fromPath, fromMd5)
     }
 
     /** One row of `files_in_chat_table`'s picture records. */
@@ -271,9 +316,13 @@ class ConversationIndex(context: Context) {
         return out
     }
 
-    /** Every cache name (without `Cache_`) a sent-from-here message named. */
+    /**
+     * Every cache name (without `Cache_`) the name routes filed a conversation for:
+     * the files a sent-from-here message named itself, and the `chatimg`/`chatthumb`
+     * copies whose names QQ derived from the picture's md5.
+     */
     fun allNamed(): Map<String, String> {
-        val out = HashMap<String, String>(50_000)
+        val out = HashMap<String, String>(200_000)
         helper.readableDatabase.rawQuery("SELECT base, peer FROM named", null).use { cursor ->
             while (cursor.moveToNext()) out[cursor.getString(0)] = cursor.getString(1)
         }
