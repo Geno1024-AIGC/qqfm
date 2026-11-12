@@ -278,42 +278,60 @@ static void scan_element(const unsigned char *b, size_t n, struct pic_info *p)
     }
 }
 
-/* Returns 1 when the body yielded an md5. */
-static int scan_blob(const unsigned char *b, size_t n, struct pic_info *p)
+/*
+ * Calls `emit` once for every message segment that carries an md5.
+ *
+ * A body is a list of segments, not one segment: a picture with a caption has
+ * two, and a message that forwarded several pictures has more. Scanning them
+ * all into one `pic_info` kept the first md5 and the last element type, so
+ * every picture after the first was lost and the surviving one was labelled
+ * with its neighbour's type. Each segment is a separate picture, so each is
+ * reported separately.
+ */
+static void scan_blob_each(const unsigned char *b, size_t n,
+                           void (*emit)(void *ctx, struct pic_info *p),
+                           void *ctx)
 {
     size_t i = 0;
     int inner = 0;
     unsigned long long tag, fn;
 
-    memset(p, 0, sizeof(*p));
-    p->elem = -1;
-    p->size = -1;
-
     while (i < n && varint_at(b, n, &i, &tag) == 0) {
         fn = tag >> 3;
         if ((tag & 7) == 2) {
             unsigned long long len;
-            if (varint_at(b, n, &i, &len) || len > n - i) return 0;
+            if (varint_at(b, n, &i, &len) || len > n - i) return;
             if (fn == 40800) {
-                scan_element(b + i, (size_t)len, p);
+                struct pic_info p;
+                memset(&p, 0, sizeof(p));
+                p.elem = -1;
+                p.size = -1;
+                scan_element(b + i, (size_t)len, &p);
                 inner = 1;
+                if (p.have) emit(ctx, &p);
             }
             i += (size_t)len;
         } else if ((tag & 7) == 0) {
             unsigned long long v;
-            if (varint_at(b, n, &i, &v)) return 0;
+            if (varint_at(b, n, &i, &v)) return;
         } else if ((tag & 7) == 1) {
-            if (i + 8 > n) return 0;
+            if (i + 8 > n) return;
             i += 8;
         } else if ((tag & 7) == 5) {
-            if (i + 4 > n) return 0;
+            if (i + 4 > n) return;
             i += 4;
         } else {
-            return 0;
+            return;
         }
     }
-    if (!inner) scan_element(b, n, p); /* already an element list */
-    return p->have;
+    if (!inner) { /* already an element list */
+        struct pic_info p;
+        memset(&p, 0, sizeof(p));
+        p.elem = -1;
+        p.size = -1;
+        scan_element(b, n, &p);
+        if (p.have) emit(ctx, &p);
+    }
 }
 
 /* Prints sqlite_master tables plus the WAL merge summary, into out. */
@@ -493,6 +511,26 @@ static void buf_add_text(sqlite3_stmt *q, int i, nt_buf *out)
         buf_add(out, "%c", c);
     }
 }
+
+struct pics_emit {
+    nt_buf *out;
+    sqlite3_stmt *q;
+    struct pics_run *st;
+    const char *table;
+};
+
+static void emit_pic(void *ctx, struct pic_info *p)
+{
+    struct pics_emit *e = ctx;
+
+    buf_add(e->out, "%s\t%lld\t", e->table, e->st->last);
+    buf_add_text(e->q, 1, e->out);
+    buf_add(e->out, "\t");
+    buf_add_text(e->q, 2, e->out);
+    buf_add(e->out, "\t%lld\t%s\t%s\t%lld\t%s\n", p->elem, p->md5, p->name,
+            p->size, p->path);
+    e->st->matches++;
+}
 static int run_pics_resume(sqlite3 *db, struct pics_run *st, nt_buf *out,
                            char *emsg, size_t emsglen)
 {
@@ -544,7 +582,7 @@ static int run_pics_resume(sqlite3 *db, struct pics_run *st, nt_buf *out,
         sqlite3_bind_int64(q, 1, st->last);
 
         while ((rc = sqlite3_step(q)) == SQLITE_ROW) {
-            struct pic_info p;
+            struct pics_emit em;
             const unsigned char *blob = sqlite3_column_blob(q, 3);
             int n = sqlite3_column_bytes(q, 3);
 
@@ -555,15 +593,12 @@ static int run_pics_resume(sqlite3 *db, struct pics_run *st, nt_buf *out,
                 fprintf(stderr, "ntdbread: %s scanned=%d media=%d\n", table,
                         st->rows, st->matches);
             if (!blob || n <= 0) continue;
-            if (!scan_blob(blob, (size_t)n, &p)) continue;
-            st->matches++;
 
-            buf_add(out, "%s\t%lld\t", table, st->last);
-            buf_add_text(q, 1, out);
-            buf_add(out, "\t");
-            buf_add_text(q, 2, out);
-            buf_add(out, "\t%lld\t%s\t%s\t%lld\t%s\n", p.elem, p.md5, p.name,
-                    p.size, p.path);
+            em.out = out;
+            em.q = q;
+            em.st = st;
+            em.table = table;
+            scan_blob_each(blob, (size_t)n, emit_pic, &em);
         }
         if (rc == SQLITE_DONE) rc = SQLITE_OK;
         if (rc != SQLITE_OK) {
