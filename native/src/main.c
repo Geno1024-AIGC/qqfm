@@ -148,6 +148,10 @@ static void usage(void)
             "               size (-1 = unknown) for every message body\n"
             "               carrying a media md5; elem is 45002 (2 = image,\n"
             "               3 = video/file, 4 = voice)\n"
+            "  --since T=N  with --pics: start table T at msgid > N instead\n"
+            "               of at its first row, so an interrupted scan can\n"
+            "               be continued (repeatable; the table names are\n"
+            "               group_msg_table and c2c_msg_table)\n"
             "  --locate N   walk the b-tree to the leaf holding msgid N and\n"
             "               report the page's cells (root auto-detected for\n"
             "               group_msg_table; --root overrides)\n"
@@ -475,16 +479,25 @@ static int run_sql(sqlite3 *db, const char *sql, nt_buf *out,
  * database and calls again, so a live writer costs one chunk of latency,
  * never the whole run.
  */
+static const char *pics_tables[] = {"group_msg_table", "c2c_msg_table"};
+#define PICS_TABLES ((int)(sizeof(pics_tables) / sizeof(pics_tables[0])))
+
 struct pics_run {
     int table;             /* index into pics_tables */
     int tstate[2];         /* 0 unchecked, 1 absent, 2 present */
     int header;            /* TSV header already written to out */
     long long last;        /* resume point: emit rows with msgid > last */
+    /* Where each table starts: -1 for a full scan, or the caller's watermark
+     * from an earlier run (--since). */
+    long long from[PICS_TABLES];
     int rows, matches;
 };
 
-static const char *pics_tables[] = {"group_msg_table", "c2c_msg_table"};
-#define PICS_TABLES ((int)(sizeof(pics_tables) / sizeof(pics_tables[0])))
+/* Entering a table resets the resume point to that table's start. */
+static void pics_enter(struct pics_run *st)
+{
+    st->last = st->table < PICS_TABLES ? st->from[st->table] : -1;
+}
 #define PICS_CHUNK 50000
 
 /* Chunk size; NTDB_PICS_CHUNK overrides it so the offline test can cross a
@@ -563,7 +576,7 @@ static int run_pics_resume(sqlite3 *db, struct pics_run *st, nt_buf *out,
         }
         if (st->tstate[st->table] == 1) {
             st->table++;
-            st->last = -1;
+            pics_enter(st);
             continue;
         }
 
@@ -621,7 +634,7 @@ static int run_pics_resume(sqlite3 *db, struct pics_run *st, nt_buf *out,
 
         if (chunk_rows < chunk) { /* short chunk: table exhausted */
             st->table++;
-            st->last = -1;
+            pics_enter(st);
         }
     }
     return SQLITE_OK;
@@ -639,7 +652,10 @@ int main(int argc, char **argv)
     int locate = 0, dump = 0, full = 0;
     long long locate_key = 0;
     unsigned int dump_pgno = 0, root_pgno = 0;
+    long long since[PICS_TABLES];
     int i, rc;
+
+    for (i = 0; i < PICS_TABLES; i++) since[i] = -1;
 
     for (i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -649,6 +665,17 @@ int main(int argc, char **argv)
             no_wal = 1;
         } else if (strcmp(a, "--pics") == 0) {
             pics = 1;
+        } else if (strcmp(a, "--since") == 0) {
+            int k;
+            char *eq;
+            if (++i >= argc) die("--since needs <table>=<msgid>");
+            eq = strchr(argv[i], '=');
+            if (!eq) die("--since wants <table>=<msgid>, got: %s", argv[i]);
+            *eq = '\0';
+            for (k = 0; k < PICS_TABLES; k++)
+                if (strcmp(argv[i], pics_tables[k]) == 0) break;
+            if (k == PICS_TABLES) die("--since names an unknown table: %s", argv[i]);
+            since[k] = strtoll(eq + 1, NULL, 10);
         } else if (strcmp(a, "--locate") == 0) {
             if (++i >= argc) die("--locate needs a msgid");
             locate_key = strtoll(argv[i], NULL, 10);
@@ -814,7 +841,8 @@ int main(int argc, char **argv)
         long long prev_last = -1, skip_last = -1;
 
         memset(&prun, 0, sizeof(prun));
-        prun.last = -1;
+        memcpy(prun.from, since, sizeof(prun.from));
+        pics_enter(&prun);
 
         rc = SQLITE_ERROR;
         for (;;) {
@@ -882,7 +910,7 @@ int main(int argc, char **argv)
                     skipped++;
                     fails = 0;
                     prun.table++;
-                    prun.last = -1;
+                    pics_enter(&prun);
                     if (prun.table >= PICS_TABLES) break;
                     continue;
                 }

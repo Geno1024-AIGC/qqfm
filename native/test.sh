@@ -117,6 +117,41 @@ CHUNKED=$(NTDB_PICS_CHUNK=2 ./build/ntdbread-host --md5key "$MD5KEY" \
     "$FIXTURE" --pics 2>/dev/null)
 [ "$CHUNKED" = "$PICS" ] || { echo "FAIL: chunked scan differs" >&2; exit 1; }
 
+echo "== pics resume from a watermark =="
+# --since skips the rows at or below the watermark of the named table and
+# leaves the other table alone; a continued scan must equal the tail of the
+# full one, so the caller can keep what an earlier run already filed.
+RESUMED=$(./build/ntdbread-host --md5key "$MD5KEY" "$FIXTURE" --pics \
+    --since group_msg_table=1001 2>/dev/null)
+echo "$RESUMED"
+[ "$(printf '%s\n' "$RESUMED" | awk -F'\t' 'NR>1' | wc -l)" -eq 2 ] \
+    || { echo "FAIL: --since did not drop exactly one row" >&2; exit 1; }
+printf '%s\n' "$RESUMED" | grep -q "1001	761140305" \
+    && { echo "FAIL: --since kept the row at the watermark" >&2; exit 1; }
+printf '%s\n' "$RESUMED" | grep -q "1003	761140305" \
+    || { echo "FAIL: --since dropped a row past the watermark" >&2; exit 1; }
+printf '%s\n' "$RESUMED" | grep -q "0f4b1c7a9d3e5268b0ac41d7e93f2a51" \
+    || { echo "FAIL: --since silenced the untouched table" >&2; exit 1; }
+# Both tables can carry their own watermark, and the chunk boundary must not
+# let a skipped table be entered at the wrong point.
+BOTH=$(NTDB_PICS_CHUNK=2 ./build/ntdbread-host --md5key "$MD5KEY" "$FIXTURE" \
+    --pics --since group_msg_table=1003 --since c2c_msg_table=2000 2>/dev/null)
+echo "$BOTH"
+[ "$(printf '%s\n' "$BOTH" | awk -F'\t' 'NR>1' | wc -l)" -eq 1 ] \
+    || { echo "FAIL: two --since flags" >&2; exit 1; }
+printf '%s\n' "$BOTH" | grep -q "c2c_msg_table	2001	" \
+    || { echo "FAIL: two --since flags lost the c2c row" >&2; exit 1; }
+# A watermark at or past the last row yields the header and nothing else.
+printf '%s\n' "$(./build/ntdbread-host --md5key "$MD5KEY" "$FIXTURE" --pics \
+    --since group_msg_table=999999 --since c2c_msg_table=999999 2>/dev/null)" \
+    | awk -F'\t' 'NR>1 {bad=1} END {exit bad}' \
+    || { echo "FAIL: watermark past the end still emitted rows" >&2; exit 1; }
+# A misspelled table is a usage error, not a silent full scan.
+./build/ntdbread-host --md5key "$MD5KEY" "$FIXTURE" --pics \
+    --since wrong_table=1 >/dev/null 2>&1 \
+    && { echo "FAIL: unknown --since table accepted" >&2; exit 1; }
+true
+
 echo "== pics torn read keeps partial output =="
 TORN="$(mktemp /tmp/ntdb-torn-XXXXXX.db)"
 TORNERR="$(mktemp /tmp/ntdb-torn-err-XXXXXX)"
