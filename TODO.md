@@ -167,10 +167,36 @@
 `chatthumb`（`Cache_xxx_hd` 与 `Cache_xxx`）∩ `chatimg` = **0**，∩ `chatraw` = **0**。
 所以 `Cache_${base}_hd` 这种"缩略图按同名去找"的猜测是错的，代码里已删掉。
 
-**QQ 的两个附带库也没有本地文件名**：
-`rich_media.db` 只有 `file_table`（420 行，全是文件消息：pptx/txt/mp4），
-`files_in_chat.db` 有 538,187 行（`45002` 元素类型 + `40021` 会话 + `45406` md5），
-但两者都**没有本地路径或 `Cache_` 名**，只能用来交叉验证 md5，不能代替哈希。
+**更正（2026-11-12）：`files_in_chat.db` 其实有本地路径，但对图片仍然无用。**
+
+之前的结论"两个附带库都没有本地路径"是**错的**，原因是 SQLite 的坑：这些库的列名是纯数字，
+`SELECT 45403` 会被解析成整数字面量 45403，必须写成 `"45403"`。改正后重测：
+
+`files_in_chat_table` 共 538,453 行，`45403` 列确实是本地路径（360,270 行含 `/storage/`、
+273,984 行含 `Cache_`）。但按元素类型 `45002` 拆开，没有一行同时具备"图片 + 会话 + 本地路径"：
+
+| `45002` | 行数 | 会话 `40021` | 本地路径 `45403` | 说明 |
+|---|---|---|---|---|
+| 0 | 273,981 | 空 | chatimg 146,532 / chatthumb 107,466 / chatraw **19,189** | 纯缓存清单，无法归类 |
+| 2 | 178,101 | 有 | **全空** | 图片消息，`45406` 是 16 字节 base64（与 md5 同长），无文件名 |
+| 3 | 335 | 有 | `QQfile_recv`；`Cache_` 仅 2 行 | 文件/视频 |
+| 4 | 40,216 | 有 | `ptt/*.amr` | 语音 |
+
+`rich_media.db` 的 `file_table`（364 行）同样只有文件消息的 `QQfile_recv` 路径。
+
+**该目录下全部数据库（2026-11-12 已全部拉到 `/tmp/opencode/db/`，`nt_msg.db` 除外——它早就在）**：
+- 消息与索引：`nt_msg.db`、`group_msg_fts.db`（5.4 GB）、`buddy_msg_fts.db`、`msg_fts.db`、
+  `data_line_msg_fts.db`、`discuss_msg_fts.db`、`guild_msg.db`（QQ 频道消息）
+- 资料：`group_info.db`、`profile_info.db`、`gpro_v1-6_u_….db`
+- 媒体/文件：`files_in_chat.db`、`rich_media.db`、`filebridge_download.db`、`filebridge_pc.db`、
+  `file_assistant.db`、`nt_flash_transfer.db`
+- 其它：`misc.db`、`emoji.db`、`settings.db`，以及 1 KB 空库 `collection` / `rdelivery` /
+  `recent_contact` / `yffm`
+
+逐个看 schema 的结论：`*_fts` 全是**纯文本**全文索引（`41701`–`41707` 文本列 + 会话 + msgid），
+不可能有文件名；`guild_msg` 是频道；其余是配置/表情/文件互传。`gpro`、`file_assistant`、
+`nt_flash_transfer` 用本机的 md5key 解不开（另有密钥）。**没有一个库能多归类一张图片**，
+所以不必再花时间找库；要提升覆盖率只能走内容 md5 之外的路线（感知哈希或按时间邻近匹配）。
 
 **实现（已合并）**：
 - `NtdbTool`：定位 `nt_msg.db`、从厂商头推导 key、把 APK assets 里的 arm64 读取器落地执行。
