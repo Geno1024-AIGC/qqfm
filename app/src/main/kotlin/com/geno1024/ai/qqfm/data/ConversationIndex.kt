@@ -40,10 +40,10 @@ class ConversationIndex(context: Context) {
      * Two routes, because QQ records two different things:
      *
      *  - [needed] md5s: the bytes of `chatraw` are the bytes that were sent, so a
-     *    picture there matches the message's own md5. Every element type is accepted,
-     *    not just pictures: the md5 is of the file's bytes, and `needed` only holds
-     *    files that exist in `chatraw`, so a video or voice row can never match one.
-     *    Restricting the type was dropping pictures that QQ filed as a file element.
+     *    picture there matches the message's own md5. Every element type is accepted
+     *    rather than only pictures: the md5 is of the file's bytes, and `needed` only
+     *    holds files that exist in `chatraw`, so a video or voice row can never match
+     *    one, while an image QQ filed under another type still can.
      *  - [localBases]: a message the user sent from this phone carries the local
      *    cache path it wrote (`f45403`, `::NTOSFull::…/Cache_<id>`). That name is
      *    only usable when the file exists here — another sender's path names a file
