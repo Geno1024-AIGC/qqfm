@@ -46,6 +46,12 @@ class MediaHashIndex(private val context: Context) {
         }
     }
 
+    /** A cheap change marker for the md5 cache, for the index build's cache token. */
+    fun stamp(source: MediaSource): String {
+        val file = cacheFile(source)
+        return "${file.length()}:${file.lastModified()}"
+    }
+
     /**
      * Hashes every file of [source] that is new or changed.
      *
@@ -59,6 +65,15 @@ class MediaHashIndex(private val context: Context) {
         cache: MutableMap<String, Entry>,
         onProgress: (Int, Int) -> Unit = { _, _ -> },
     ) {
+        // A picture the user deleted leaves its md5 behind. Keeping it would only
+        // grow the conversation map with files that no longer exist — and since the
+        // gallery deletes through this app, the leftovers are ours to clean. The
+        // listing is the truth here; the cost of trusting a short listing is one
+        // re-hash of the files it missed.
+        val live = HashSet<String>(items.size * 2)
+        items.mapTo(live) { it.base }
+        cache.keys.retainAll(live)
+
         val todo = items.filter { item ->
             val known = cache[item.base]
             known == null || known.size != item.size || known.mtime != item.mtime

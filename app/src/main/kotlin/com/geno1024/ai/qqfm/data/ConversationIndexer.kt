@@ -21,6 +21,11 @@ import android.content.Context
  *
  * Only the pictures that exist locally are stored, so the index stays at a few
  * megabytes instead of the two million plus message rows.
+ *
+ * A whole build reads ~17 GB and ~16 GB, so it is also *skipped* when nothing it
+ * depends on moved: the sizes and timestamps of QQ's two databases and of the
+ * app's own listings and hash cache are folded into one token, stored next to the
+ * index, and compared before any work starts.
  */
 class ConversationIndexer(
     private val context: Context,
@@ -30,14 +35,35 @@ class ConversationIndexer(
     private val hashes = MediaHashIndex(context)
     private val conversations = ConversationIndex(context)
 
-    /** What the build is doing right now, for a progress line. */
+    /**
+     * What the build is doing right now.
+     *
+     * Each state carries enough for the about page to fill a progress bar without
+     * knowing anything about the database: [Hashing] and [ReadingTrees] count files,
+     * [ReadingMessages] reports how far through the message id space it is (the
+     * tables are read in id order, and a row total would cost a full 74 s scan),
+     * [ReadingFiles] counts rows of a table whose size the last build remembered.
+     */
     sealed interface Phase {
         data object Locating : Phase
         data class Hashing(val done: Int, val total: Int) : Phase
-        data object ReadingTrees : Phase
-        data class ReadingMessages(val scanned: Long, val matched: Int) : Phase
-        data class ReadingFiles(val scanned: Long, val matched: Int) : Phase
+        data class ReadingTrees(
+            val tree: MediaSource,
+            val done: Int,
+            /** From the last build; 0 while it is still unknown. */
+            val total: Int,
+        ) : Phase
+        data class ReadingMessages(
+            val table: String,
+            val scanned: Long,
+            val matched: Int,
+            /** 0..1 across the whole message pass. */
+            val fraction: Float,
+        ) : Phase
+        data class ReadingFiles(val scanned: Long, val matched: Int, val total: Long) : Phase
         data object Naming : Phase
+        /** The cache token matched: nothing was read at all. */
+        data object Unchanged : Phase
     }
 
     data class Result(
@@ -54,6 +80,8 @@ class ConversationIndexer(
         /** Links only the file table knew. */
         val fromFiles: Int,
         val conversations: Int,
+        /** True when the build was skipped because the token still matched. */
+        val cached: Boolean = false,
     )
 
     sealed interface Outcome {
@@ -64,15 +92,26 @@ class ConversationIndexer(
     /**
      * Runs the whole chain. Blocking: call it from an IO thread.
      *
-     * The hash cache survives between runs, so a second build only hashes new or
-     * changed files. The message pass is always done in full: QQ rewrites rows and
-     * the index has to be able to repair itself, and there is no cheap way to notice
-     * that a 16 GB database changed.
+     * Pass [force] to rebuild even when nothing changed; otherwise a matching token
+     * returns the numbers the last build reported without touching the device.
      */
-    fun build(onPhase: (Phase) -> Unit = {}): Outcome {
+    fun build(force: Boolean = false, onPhase: (Phase) -> Unit = {}): Outcome {
         onPhase(Phase.Locating)
         val target = NtdbTool.target()
             ?: return Outcome.Failed("找不到 QQ 的消息数据库（需要 root 权限）")
+
+        val token = token(target)
+        if (!force) {
+            stored(token)?.let { result ->
+                onPhase(Phase.Unchanged)
+                return Outcome.Done(result)
+            }
+        }
+
+        // What the last build measured. The message tables are 2.4 million rows apart
+        // in weight, and the progress bar has to know that before this build can
+        // count them again.
+        val previous = conversations.metaAll()
 
         val items = repository.loadCached(MediaSource.RAW)
             ?: repository.scan(MediaSource.RAW).items
@@ -92,42 +131,147 @@ class ConversationIndexer(
         // the other two trees for the derived-name route, so all three are scanned
         // once and cached; a picture the gallery cannot show is a link not worth
         // storing.
-        onPhase(Phase.ReadingTrees)
         val localBases = HashSet<String>(400_000)
         items.mapTo(localBases) { it.base }
+        val treeSizes = HashMap<String, Int>(4)
         CacheName.TREES.forEach { source ->
-            val tree = repository.loadCached(source) ?: repository.scan(source).items
+            val prior = previous["tree.${source.id}"]?.toIntOrNull() ?: 0
+            val tree = repository.loadCached(source) ?: repository.scan(source) { done ->
+                onPhase(Phase.ReadingTrees(source, done, prior))
+            }.items
             tree.mapTo(localBases) { it.base }
+            treeSizes[source.id] = tree.size
         }
-        val matched = intArrayOf(0)
-        val filed = conversations.rebuildFrom(target, needed, localBases, context) { scanned, found ->
-            matched[0] = found
-            onPhase(Phase.ReadingMessages(scanned, found))
+
+        val bounds = NtdbTool.messageBounds(context, target)
+        val order = listOf("group_msg_table", "c2c_msg_table").filter { it in bounds }
+        val weights = tableWeights(previous, order)
+        val weightSum = weights.values.sum().takeIf { it > 0 } ?: 1.0
+        val weightBefore = HashMap<String, Double>(4)
+        run {
+            var accumulated = 0.0
+            for (table in order) {
+                weightBefore[table] = accumulated
+                accumulated += weights[table] ?: 0.0
+            }
+        }
+
+        val filed = conversations.rebuildFrom(
+            target, needed, localBases, context,
+        ) { scanned, found, table, msgid ->
+            val span = bounds[table]
+            val within = if (span != null && span.last > span.first) {
+                ((msgid - span.first).toDouble() / (span.last - span.first)).coerceIn(0.0, 1.0)
+            } else {
+                0.0
+            }
+            val fraction = (weightBefore[table] ?: 0.0) + within * (weights[table] ?: 0.0)
+            onPhase(
+                Phase.ReadingMessages(
+                    table = table,
+                    scanned = scanned,
+                    matched = found,
+                    fraction = (fraction / weightSum).toFloat().coerceIn(0f, 1f),
+                ),
+            )
         }
 
         // A second, independent md5 → conversation table. On a real library this one
-        // knows 99,262 of the 116,544 `chatraw` files where the message scan knows
-        // 65,948, and they agree about the conversation for 92% of the md5s both hold.
-        val fromFiles = intArrayOf(0)
+        // knows 84,632 of the 100,875 `chatraw` files where the message scan knows
+        // 56,112, and they agree about the conversation for 92% of the md5s both hold.
+        val priorFileRows = previous["scan.files"]?.toLongOrNull() ?: 0L
+        var filesScanned = 0L
         conversations.addFilePictures(target, needed, context) { scanned, found ->
-            fromFiles[0] = found
-            onPhase(Phase.ReadingFiles(scanned, found))
+            filesScanned = scanned
+            onPhase(Phase.ReadingFiles(scanned, found, priorFileRows))
         }
 
         onPhase(Phase.Naming)
         val peers = conversations.peers()
         conversations.namePeers(target, context, peers.map { it.first })
 
-        return Outcome.Done(
-            Result(
-                files = items.size,
-                hashed = needed.size,
-                indexed = peers.sumOf { it.second },
-                named = filed.fromPath,
-                fromNames = filed.fromMd5,
-                fromFiles = conversations.fileOnlyCount(),
-                conversations = peers.size,
-            ),
+        val result = Result(
+            files = items.size,
+            hashed = needed.size,
+            indexed = peers.sumOf { it.second },
+            named = filed.fromPath,
+            fromNames = filed.fromMd5,
+            fromFiles = conversations.fileOnlyCount(),
+            conversations = peers.size,
+        )
+        conversations.putMeta(
+            buildMap {
+                put("build.token", token)
+                put("result.files", result.files.toString())
+                put("result.hashed", result.hashed.toString())
+                put("result.indexed", result.indexed.toString())
+                put("result.named", result.named.toString())
+                put("result.fromNames", result.fromNames.toString())
+                put("result.fromFiles", result.fromFiles.toString())
+                put("result.conversations", result.conversations.toString())
+                put("scan.files", filesScanned.toString())
+                filed.rowsByTable.forEach { (table, rows) -> put("rows.$table", rows.toString()) }
+                treeSizes.forEach { (id, size) -> put("tree.$id", size.toString()) }
+            },
+        )
+        return Outcome.Done(result)
+    }
+
+    /**
+     * How the message tables weigh against each other for the progress bar.
+     *
+     * Row counts from the last build are exact. On the first build they are unknown —
+     * counting them costs a full decrypt-and-scan — so the split measured on a real
+     * library stands in, and is replaced by the real numbers as soon as this build
+     * finishes.
+     */
+    private fun tableWeights(previous: Map<String, String>, order: List<String>): Map<String, Double> {
+        val rows = order.associateWith { previous["rows.$it"]?.toLongOrNull() ?: 0L }
+        if (rows.values.any { it > 0 }) return rows.mapValues { it.value.toDouble() }
+        return mapOf("group_msg_table" to 0.96, "c2c_msg_table" to 0.04)
+    }
+
+    /**
+     * One string that changes whenever something the index is built from changes:
+     * QQ's two databases (and their write-ahead logs, which move first), this app's
+     * cached tree listings, and the md5 cache.
+     */
+    private fun token(target: NtdbTool.Target): String {
+        val db = target.dbPath
+        val paths = listOf(
+            db,
+            "$db-wal",
+            "${target.dbDir}/files_in_chat.db",
+            "${target.dbDir}/files_in_chat.db-wal",
+        )
+        val sizes = RootShell.exec(
+            "stat -c '%s:%Y' -- " + paths.joinToString(" ") { RootShell.shellQuote(it) } + " 2>/dev/null",
+        ).output.lineSequence().map(String::trim).filter(String::isNotEmpty).joinToString(",")
+        return buildString {
+            append("v$INDEX_VERSION|").append(sizes)
+            append("|raw:").append(repository.stamp(MediaSource.RAW))
+            CacheName.TREES.forEach { append('|').append(it.id).append(':').append(repository.stamp(it)) }
+            append("|hash:").append(hashes.stamp(MediaSource.RAW))
+        }
+    }
+
+    /** The result a build with [token] produced, or null when that was another build. */
+    private fun stored(token: String): Result? {
+        val meta = conversations.metaAll()
+        if (meta["build.token"] != token) return null
+        // A cleared index leaves the token behind; the counts are what say whether
+        // there is anything to reuse.
+        val indexed = meta["result.indexed"]?.toIntOrNull() ?: return null
+        if (indexed <= 0) return null
+        return Result(
+            files = meta["result.files"]?.toIntOrNull() ?: 0,
+            hashed = meta["result.hashed"]?.toIntOrNull() ?: 0,
+            indexed = indexed,
+            named = meta["result.named"]?.toIntOrNull() ?: 0,
+            fromNames = meta["result.fromNames"]?.toIntOrNull() ?: 0,
+            fromFiles = meta["result.fromFiles"]?.toIntOrNull() ?: 0,
+            conversations = meta["result.conversations"]?.toIntOrNull() ?: 0,
+            cached = true,
         )
     }
 
@@ -146,7 +290,7 @@ class ConversationIndexer(
      */
     fun conversationsByBase(): Map<String, Conversation> {
         val names = HashMap<String, String>()
-        val out = HashMap<String, Conversation>(200_000)
+        val out = HashMap<String, Conversation>(400_000)
 
         fun put(base: String, peer: String) {
             val name = names.getOrPut(peer) { nameOf(peer) ?: peer }
@@ -177,4 +321,12 @@ class ConversationIndexer(
     fun nameOf(peer: String): String? = conversations.nameOf(peer)
 
     fun indexed(): Int = conversations.indexed()
+
+    private companion object {
+        /**
+         * Bumped when the meaning of a stored link changes, so an old index is
+         * rebuilt instead of being trusted by the cache token.
+         */
+        const val INDEX_VERSION = 1
+    }
 }

@@ -27,6 +27,7 @@ class ConversationIndex(context: Context) {
                 execSQL("DELETE FROM pic")
                 execSQL("DELETE FROM named")
                 execSQL("DELETE FROM filepic")
+                execSQL("DELETE FROM meta")
                 setTransactionSuccessful()
             } finally {
                 endTransaction()
@@ -35,7 +36,12 @@ class ConversationIndex(context: Context) {
     }
 
     /** What the two name routes filed, for the report on the about page. */
-    data class Filed(val fromPath: Int, val fromMd5: Int)
+    data class Filed(
+        val fromPath: Int,
+        val fromMd5: Int,
+        /** Rows each message table held, so the next build's bar knows their weight. */
+        val rowsByTable: Map<String, Long>,
+    )
 
     /**
      * Rebuilds the index from a live scan of the message database.
@@ -66,7 +72,8 @@ class ConversationIndex(context: Context) {
         needed: Set<String>,
         localBases: Set<String>,
         context: Context,
-        onProgress: (scanned: Long, matched: Int) -> Unit = { _, _ -> },
+        onProgress: (scanned: Long, matched: Int, table: String, msgid: Long) -> Unit =
+            { _, _, _, _ -> },
     ): Filed {
         val db = helper.writableDatabase
         db.beginTransaction()
@@ -127,12 +134,14 @@ class ConversationIndex(context: Context) {
 
         var fromPath = 0
         var fromMd5 = 0
+        val rowsByTable = HashMap<String, Long>()
 
         try {
             db.beginTransaction()
             try {
                 NtdbTool.forEachPic(context, target) { row ->
                     scanned++
+                    rowsByTable.merge(row.table, 1L, Long::plus)
                     if (row.md5 in needed) {
                         insert.bindString(1, row.md5)
                         insert.bindString(2, row.peer)
@@ -182,7 +191,7 @@ class ConversationIndex(context: Context) {
                         }
                     }
 
-                    if (scanned % 20_000 == 0L) onProgress(scanned, matched)
+                    if (scanned % 20_000 == 0L) onProgress(scanned, matched, row.table, row.msgid)
                 }
                 db.setTransactionSuccessful()
             } finally {
@@ -194,8 +203,8 @@ class ConversationIndex(context: Context) {
             insertNamed.close()
             replaceNamed.close()
         }
-        onProgress(scanned, matched)
-        return Filed(fromPath, fromMd5)
+        onProgress(scanned, matched, "", 0L)
+        return Filed(fromPath, fromMd5, rowsByTable)
     }
 
     /** One row of `files_in_chat_table`'s picture records. */
@@ -317,6 +326,36 @@ class ConversationIndex(context: Context) {
     }
 
     /**
+     * The build's small key/value bag: the cache token and the numbers the about page
+     * reports. Kept in SQLite rather than a file so it is written in the same
+     * transaction as the index it describes.
+     */
+    fun metaAll(): Map<String, String> {
+        val out = HashMap<String, String>(32)
+        helper.readableDatabase.rawQuery("SELECT key, value FROM meta", null).use { cursor ->
+            while (cursor.moveToNext()) out[cursor.getString(0)] = cursor.getString(1)
+        }
+        return out
+    }
+
+    fun putMeta(values: Map<String, String>) {
+        if (values.isEmpty()) return
+        val db = helper.writableDatabase
+        db.beginTransaction()
+        try {
+            for ((key, value) in values) {
+                db.execSQL(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+                    arrayOf<Any>(key, value),
+                )
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    /**
      * Every cache name (without `Cache_`) the name routes filed a conversation for:
      * the files a sent-from-here message named itself, and the `chatimg`/`chatthumb`
      * copies whose names QQ derived from the picture's md5.
@@ -413,7 +452,7 @@ class ConversationIndex(context: Context) {
         helper.readableDatabase.rawQuery("SELECT name FROM peer_name WHERE peer = ?", arrayOf(peer))
             .use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
 
-    private class Helper(context: Context) : SQLiteOpenHelper(context, "conversation.db", null, 3) {
+    private class Helper(context: Context) : SQLiteOpenHelper(context, "conversation.db", null, 4) {
         init {
             // The scan writes while the gallery reads; WAL keeps them apart.
             setWriteAheadLoggingEnabled(true)
@@ -443,12 +482,13 @@ class ConversationIndex(context: Context) {
             )
             db.execSQL("CREATE INDEX filepic_peer ON filepic(peer)")
             db.execSQL("CREATE TABLE peer_name(peer TEXT PRIMARY KEY, name TEXT NOT NULL)")
+            db.execSQL("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         }
 
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
             // The index is expensive to build, so upgrades never drop it. Version 2
-            // adds the name route, version 3 the file-table route; both tables start
-            // empty and the next build fills them.
+            // adds the name route, version 3 the file-table route, version 4 the
+            // cache token; every new table starts empty and the next build fills it.
             if (oldVersion < 2) {
                 db.execSQL(
                     "CREATE TABLE IF NOT EXISTS named(" +
@@ -466,6 +506,11 @@ class ConversationIndex(context: Context) {
                         "time INTEGER NOT NULL)",
                 )
                 db.execSQL("CREATE INDEX IF NOT EXISTS filepic_peer ON filepic(peer)")
+            }
+            if (oldVersion < 4) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+                )
             }
         }
     }

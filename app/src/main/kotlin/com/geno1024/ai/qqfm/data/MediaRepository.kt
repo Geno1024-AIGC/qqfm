@@ -26,6 +26,18 @@ class MediaRepository(
 
     private fun cacheFile(source: MediaSource): File = File(context.cacheDir, "scan-${source.id}.tsv")
 
+    /**
+     * A cheap change marker for [source]'s cached listing.
+     *
+     * The conversation index uses it to decide whether anything it depends on moved
+     * since the last build; the listing is rewritten by every scan, so its size and
+     * timestamp change with it.
+     */
+    fun stamp(source: MediaSource): String {
+        val file = cacheFile(source)
+        return "${file.length()}:${file.lastModified()}"
+    }
+
     /** Loads the cached index if present; returns null when there is none. */
     fun loadCached(source: MediaSource): List<MediaItem>? {
         if (!keepIndex()) return null

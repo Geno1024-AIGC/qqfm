@@ -101,6 +101,38 @@ object NtdbTool {
     }
 
     /**
+     * First and last message id of each message table, to drive a progress bar.
+     *
+     * `MIN`/`MAX` of the id is an index lookup — measured at 0.1 s on a 15.9 GB
+     * database — while `COUNT(*)` has to decrypt every row (a 74 s scan, which would
+     * double the build). Message ids are time-ordered, so the id is the thing worth
+     * measuring progress against. Keep the four bounds as separate sub-selects: the
+     * same query written as one `UNION ALL` loses SQLite's min/max shortcut and falls
+     * back to that full scan.
+     */
+    fun messageBounds(context: Context, target: Target): Map<String, LongRange> {
+        val sql = "SELECT (SELECT MIN([40001]) FROM group_msg_table), " +
+            "(SELECT MAX([40001]) FROM group_msg_table), " +
+            "(SELECT MIN([40001]) FROM c2c_msg_table), " +
+            "(SELECT MAX([40001]) FROM c2c_msg_table)"
+        val out = HashMap<String, LongRange>(4)
+        var header = true
+        forEachRow(context, target, target.dbPath, sql) { f ->
+            if (header) {
+                header = false
+                return@forEachRow
+            }
+            val gMin = f.getOrNull(0)?.toLongOrNull()
+            val gMax = f.getOrNull(1)?.toLongOrNull()
+            if (gMin != null && gMax != null) out["group_msg_table"] = gMin..gMax
+            val cMin = f.getOrNull(2)?.toLongOrNull()
+            val cMax = f.getOrNull(3)?.toLongOrNull()
+            if (cMin != null && cMax != null) out["c2c_msg_table"] = cMin..cMax
+        }
+        return out
+    }
+
+    /**
      * Streams the picture index: one TSV row per media element in every message.
      *
      * Columns are `table msgid peer sender elem md5 filename size`; `elem` is the

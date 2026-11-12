@@ -139,6 +139,50 @@ fun AboutScreen(
     var indexReport by remember { mutableStateOf<String?>(null) }
     val indexScope = rememberCoroutineScope()
 
+    // The build runs for minutes on the first pass, so the card shows the same kind
+    // of bar the OCR pass has: a fraction plus how long it has been going.
+    var indexTick by remember { mutableLongStateOf(0L) }
+    var indexStartedAt by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(indexRunning) {
+        if (!indexRunning) return@LaunchedEffect
+        indexStartedAt = SystemClock.elapsedRealtime()
+        while (true) {
+            indexTick = SystemClock.elapsedRealtime()
+            delay(500L)
+        }
+    }
+
+    /**
+     * Starts the index build. The main button takes the cache when it is still valid;
+     * [force] is the "rebuild anyway" path next to it.
+     */
+    fun startIndex(force: Boolean) {
+        if (indexRunning) return
+        indexRunning = true
+        indexReport = null
+        indexScope.launch {
+            val outcome = withContext(Dispatchers.IO) {
+                indexer.build(force = force) { phase -> indexPhase.value = phase }
+            }
+            indexPhase.value = null
+            indexRunning = false
+            indexReport = when (outcome) {
+                is ConversationIndexer.Outcome.Failed -> "❌ ${outcome.message}"
+                is ConversationIndexer.Outcome.Done -> {
+                    val r = outcome.result
+                    val head = if (r.cached) {
+                        "✅ 已是最新：QQ 的两个库和图片缓存都没有变化，这次没有重扫。"
+                    } else {
+                        "✅ chatraw ${r.files} 张，算出 md5 ${r.hashed} 张；"
+                    }
+                    head + "对上会话 ${r.indexed} 张（文件库补充 ${r.fromFiles} 张、" +
+                        "图片/缩略图按文件名 ${r.fromNames} 条、" +
+                        "消息自带路径 ${r.named} 条），分布在 ${r.conversations} 个会话"
+                }
+            }
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -447,39 +491,45 @@ fun AboutScreen(
                         )
                     }
                 }
-                Button(
-                    onClick = {
-                        indexRunning = true
-                        indexReport = null
-                        indexScope.launch {
-                            val outcome = withContext(Dispatchers.IO) {
-                                indexer.build { phase -> indexPhase.value = phase }
-                            }
-                            indexPhase.value = null
-                            indexRunning = false
-                            indexReport = when (outcome) {
-                                is ConversationIndexer.Outcome.Failed -> "❌ ${outcome.message}"
-                                is ConversationIndexer.Outcome.Done -> {
-                                    val r = outcome.result
-                                    "✅ chatraw ${r.files} 张，算出 md5 ${r.hashed} 张；" +
-                                        "对上会话 ${r.indexed} 张（文件库补充 ${r.fromFiles} 张、" +
-                                        "图片/缩略图按文件名 ${r.fromNames} 条、" +
-                                        "消息自带路径 ${r.named} 条），分布在 ${r.conversations} 个会话"
-                                }
-                            }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = { startIndex(force = false) },
+                        enabled = !indexRunning,
+                    ) {
+                        Text(if (indexRunning) "正在建立…" else "建立会话索引")
+                    }
+                    if (!indexRunning) {
+                        TextButton(onClick = { startIndex(force = true) }) {
+                            Text("强制重建")
                         }
-                    },
-                    enabled = !indexRunning,
-                ) {
-                    Text(if (indexRunning) "正在建立…" else "建立会话索引")
+                    }
                 }
                 phase?.let { current ->
-                    Text(
-                        text = phaseLabel(current),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontFamily = FontFamily.Monospace,
-                    )
+                    if (current != ConversationIndexer.Phase.Unchanged) {
+                        LinearProgressIndicator(
+                            progress = { phaseFraction(current) },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(
+                            text = phaseLabel(current),
+                            modifier = Modifier.weight(1f),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                        if (indexRunning) {
+                            Text(
+                                text = "用时 ${formatDuration(indexTick - indexStartedAt)}",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                            )
+                        }
+                    }
                 }
                 indexReport?.let { text ->
                     SelectionContainer {
@@ -502,7 +552,7 @@ fun AboutScreen(
 /** One line describing what the index build is doing, for the debug card. */
 private fun phaseLabel(phase: ConversationIndexer.Phase): String = when (phase) {
     ConversationIndexer.Phase.Locating -> "正在定位消息数据库…"
-    ConversationIndexer.Phase.ReadingTrees -> "正在清点图片与缩略图缓存…"
+    ConversationIndexer.Phase.Unchanged -> "缓存仍然有效，没有重扫"
     ConversationIndexer.Phase.Naming -> "正在读取会话名称…"
     is ConversationIndexer.Phase.Hashing ->
         if (phase.total == 0) {
@@ -510,8 +560,41 @@ private fun phaseLabel(phase: ConversationIndexer.Phase): String = when (phase) 
         } else {
             "正在校验图片 md5：${phase.done} / ${phase.total}"
         }
+    is ConversationIndexer.Phase.ReadingTrees ->
+        if (phase.total > 0) {
+            "正在清点 ${phase.tree.id}：${phase.done} / ${phase.total}"
+        } else {
+            "正在清点 ${phase.tree.id}：${phase.done} 个"
+        }
     is ConversationIndexer.Phase.ReadingMessages ->
         "正在读取聊天记录：已扫 ${phase.scanned} 条，命中 ${phase.matched} 张"
     is ConversationIndexer.Phase.ReadingFiles ->
         "正在读取文件库：已扫 ${phase.scanned} 条，命中 ${phase.matched} 张"
 }
+
+/**
+ * Where the whole build is, 0..1, from the numbers each phase reports.
+ *
+ * The weights follow how long the passes actually take: hashing ~100k files and
+ * reading 2.4 million message rows are minutes each, the other three are seconds.
+ */
+private fun phaseFraction(phase: ConversationIndexer.Phase): Float = (when (phase) {
+    ConversationIndexer.Phase.Locating -> 0.01f
+    is ConversationIndexer.Phase.Hashing ->
+        0.02f + 0.40f * if (phase.total > 0) phase.done.toFloat() / phase.total else 0f
+    is ConversationIndexer.Phase.ReadingTrees ->
+        0.42f + 0.06f * if (phase.total > 0) {
+            (phase.done.toFloat() / phase.total).coerceIn(0f, 1f)
+        } else {
+            0f
+        }
+    is ConversationIndexer.Phase.ReadingMessages -> 0.48f + 0.44f * phase.fraction
+    is ConversationIndexer.Phase.ReadingFiles ->
+        0.92f + 0.06f * if (phase.total > 0) {
+            (phase.scanned.toFloat() / phase.total).coerceIn(0f, 1f)
+        } else {
+            0f
+        }
+    ConversationIndexer.Phase.Naming -> 0.98f
+    ConversationIndexer.Phase.Unchanged -> 1f
+}).coerceIn(0f, 1f)
