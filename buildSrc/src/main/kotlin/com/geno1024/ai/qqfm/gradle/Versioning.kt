@@ -71,6 +71,10 @@ object Versioning {
      * The bump is a side effect of a packaging event, so the value stamped into the
      * current build is the count of *previously* completed events. Rebuilding from a
      * clean checkout of a given commit therefore reproduces the same `<pack>`.
+     *
+     * Which also means the file has to be committed for the number to move: CI checks
+     * out a fresh tree every run and throws its own bump away, so a `<pack>` that is
+     * never committed stamps the same value into every release.
      */
     fun bumpOnPackaging(project: Project, moduleDir: File, android: Boolean) {
         val names = if (android) ANDROID_PACKAGING else ANDROID_PACKAGING
