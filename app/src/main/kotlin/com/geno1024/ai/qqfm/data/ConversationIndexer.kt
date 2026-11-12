@@ -6,14 +6,16 @@ import android.content.Context
  * Builds "which conversation is this picture from" out of the two things that can
  * be read on the device: the bytes of `chatraw` and the message database.
  *
- * The chain has three links, and each one is a separate slow pass:
+ * The chain has four links, each a separate slow pass:
  *
  *  1. hash `chatraw` — its files keep the bytes that were sent, so their md5 is the
- *     md5 the message carries (measured: 55% of the tree, the rest are pictures the
+ *     md5 the message carries (measured: 56.6% of the tree, the rest are pictures the
  *     user never sent or that QQ re-encoded on the way in);
- *  2. stream every picture element out of `nt_msg.db` and keep the rows whose md5
+ *  2. stream every media element out of `nt_msg.db` and keep the rows whose md5
  *     the device actually has;
- *  3. read conversation names out of QQ's own group and profile databases.
+ *  3. read `files_in_chat.db`, QQ's own record of files it handled, which is a second
+ *     md5 → conversation map covering the pictures the message scan does not;
+ *  4. read conversation names out of QQ's own group and profile databases.
  *
  * Only the pictures that exist locally are stored, so the index stays at a few
  * megabytes instead of the two million plus message rows.
@@ -31,6 +33,7 @@ class ConversationIndexer(
         data object Locating : Phase
         data class Hashing(val done: Int, val total: Int) : Phase
         data class ReadingMessages(val scanned: Long, val matched: Int) : Phase
+        data class ReadingFiles(val scanned: Long, val matched: Int) : Phase
         data object Naming : Phase
     }
 
@@ -39,10 +42,12 @@ class ConversationIndexer(
         val files: Int,
         /** Pictures whose md5 is now known. */
         val hashed: Int,
-        /** Links stored by either route. */
+        /** Links stored by any route. */
         val indexed: Int,
         /** Links stored from a message that named its own cache file. */
         val named: Int,
+        /** Links only the file table knew. */
+        val fromFiles: Int,
         val conversations: Int,
     )
 
@@ -96,6 +101,15 @@ class ConversationIndexer(
             onPhase(Phase.ReadingMessages(scanned, found))
         }
 
+        // A second, independent md5 → conversation table. On a real library this one
+        // knows 99,262 of the 116,544 `chatraw` files where the message scan knows
+        // 65,948, and they agree about the conversation for 92% of the md5s both hold.
+        val fromFiles = intArrayOf(0)
+        conversations.addFilePictures(target, needed, context) { scanned, found ->
+            fromFiles[0] = found
+            onPhase(Phase.ReadingFiles(scanned, found))
+        }
+
         onPhase(Phase.Naming)
         val peers = conversations.peers().map { it.first }
         conversations.namePeers(target, context, peers)
@@ -104,8 +118,9 @@ class ConversationIndexer(
             Result(
                 files = items.size,
                 hashed = needed.size,
-                indexed = matched[0],
+                indexed = matched[0] + conversations.fileOnlyCount(),
                 named = conversations.namedCount(),
+                fromFiles = conversations.fileOnlyCount(),
                 conversations = peers.size,
             ),
         )

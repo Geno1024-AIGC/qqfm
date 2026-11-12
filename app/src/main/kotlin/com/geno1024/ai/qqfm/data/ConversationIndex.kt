@@ -26,6 +26,7 @@ class ConversationIndex(context: Context) {
             try {
                 execSQL("DELETE FROM pic")
                 execSQL("DELETE FROM named")
+                execSQL("DELETE FROM filepic")
                 setTransactionSuccessful()
             } finally {
                 endTransaction()
@@ -39,8 +40,10 @@ class ConversationIndex(context: Context) {
      * Two routes, because QQ records two different things:
      *
      *  - [needed] md5s: the bytes of `chatraw` are the bytes that were sent, so a
-     *    picture there matches the message's own md5. Only element type 2 is a
-     *    picture; the same md5 appears on videos, files and voice notes.
+     *    picture there matches the message's own md5. Every element type is accepted,
+     *    not just pictures: the md5 is of the file's bytes, and `needed` only holds
+     *    files that exist in `chatraw`, so a video or voice row can never match one.
+     *    Restricting the type was dropping pictures that QQ filed as a file element.
      *  - [localBases]: a message the user sent from this phone carries the local
      *    cache path it wrote (`f45403`, `::NTOSFull::…/Cache_<id>`). That name is
      *    only usable when the file exists here — another sender's path names a file
@@ -61,6 +64,7 @@ class ConversationIndex(context: Context) {
         try {
             db.execSQL("DELETE FROM pic")
             db.execSQL("DELETE FROM named")
+            db.execSQL("DELETE FROM filepic")
             db.setTransactionSuccessful()
         } finally {
             db.endTransaction()
@@ -98,7 +102,7 @@ class ConversationIndex(context: Context) {
             try {
                 NtdbTool.forEachPic(context, target) { row ->
                     scanned++
-                    if (row.elem == 2 && row.md5 in needed) {
+                    if (row.md5 in needed) {
                         insert.bindString(1, row.md5)
                         insert.bindString(2, row.peer)
                         insert.bindLong(3, row.msgid)
@@ -149,6 +153,99 @@ class ConversationIndex(context: Context) {
         onProgress(scanned, matched)
     }
 
+    /** One row of `files_in_chat_table`'s picture records. */
+    private val filePicturesSql =
+        "SELECT \"45406\", \"40021\", \"40050\" FROM files_in_chat_table WHERE \"45002\" = 2"
+
+    /**
+     * Files the pictures `files_in_chat.db` knows, as a second md5 → conversation map.
+     *
+     * That database is QQ's own record of every file it handled, and its `45406` is
+     * the content md5 written out as base64 — the same value we compute over
+     * `chatraw`. Measured on a real library: 93,237 md5s appear in both it and
+     * `nt_msg.db`, and 92% of them name the same conversation; of the rest almost all
+     * are the same picture forwarded into several chats, where the two tables pick
+     * different "first" messages. It covers 99,262 of the 116,544 `chatraw` files
+     * against the message scan's 65,948, and the union is 104,361.
+     *
+     * Only [needed] md5s are stored, so a stray row whose base64 is a file name rather
+     * than a content hash (QQ does that too) is dropped by the lookup.
+     */
+    fun addFilePictures(
+        target: NtdbTool.Target,
+        needed: Set<String>,
+        context: Context,
+        onProgress: (scanned: Long, matched: Int) -> Unit = { _, _ -> },
+    ) {
+        val db = helper.writableDatabase
+        var scanned = 0L
+        var matched = 0
+        var batch = 0
+        val insert = db.compileStatement(
+            "INSERT OR IGNORE INTO filepic(md5, peer, time) VALUES(?, ?, ?)",
+        )
+        val replace = db.compileStatement(
+            "UPDATE filepic SET peer = ?, time = ? WHERE md5 = ? AND time > ?",
+        )
+        try {
+            db.beginTransaction()
+            try {
+                NtdbTool.forEachRow(
+                    context, target, "${target.dbDir}/files_in_chat.db", filePicturesSql,
+                ) { f ->
+                    scanned++
+                    val md5 = f.getOrNull(0)?.let(::base64Md5)
+                    val peer = f.getOrNull(1).orEmpty()
+                    if (md5 != null && peer.isNotEmpty() && md5 in needed) {
+                        val time = f.getOrNull(2)?.toLongOrNull() ?: 0L
+                        insert.bindString(1, md5)
+                        insert.bindString(2, peer)
+                        insert.bindLong(3, time)
+                        if (insert.executeInsert() < 0) {
+                            replace.bindString(1, peer)
+                            replace.bindLong(2, time)
+                            replace.bindString(3, md5)
+                            replace.bindLong(4, time)
+                            replace.execute()
+                        }
+                        matched++
+                        // Commit in chunks so a long scan survives the app being
+                        // stopped, and so the gallery can read meanwhile.
+                        if (++batch >= 4000) {
+                            db.setTransactionSuccessful()
+                            db.endTransaction()
+                            db.beginTransaction()
+                            batch = 0
+                        }
+                    }
+                    if (scanned % 20_000 == 0L) onProgress(scanned, matched)
+                }
+                db.setTransactionSuccessful()
+            } finally {
+                runCatching { db.endTransaction() }
+            }
+        } finally {
+            insert.close()
+            replace.close()
+        }
+        onProgress(scanned, matched)
+    }
+
+    /**
+     * A 16-byte base64 value as hex, or null when it is not a bare 16-byte digest.
+     *
+     * QQ writes image digests as `45406` without padding in some rows, and file-name
+     * blobs in others, so length is the only filter that is both cheap and safe.
+     */
+    private fun base64Md5(text: String): String? {
+        if (text.isBlank()) return null
+        val bytes = runCatching {
+            android.util.Base64.decode(text, android.util.Base64.DEFAULT)
+        }.getOrNull() ?: return null
+        if (bytes.size != 16) return null
+        return NtdbTool.hex(bytes)
+    }
+
     /** The conversation a picture belongs to, or null when it is not indexed. */
     fun peerOf(md5: String): String? =
         helper.readableDatabase.rawQuery("SELECT peer FROM pic WHERE md5 = ?", arrayOf(md5))
@@ -159,9 +256,15 @@ class ConversationIndex(context: Context) {
      *
      * Grouping a tree asks about a hundred thousand pictures at once; one query per
      * picture would spend more time in SQLite than the grouping does.
+     *
+     * The message scan is read last so it wins where both routes know a md5: it
+     * carries the sender and a real message id, which the file table lacks.
      */
     fun allPeers(): Map<String, String> {
-        val out = HashMap<String, String>(100_000)
+        val out = HashMap<String, String>(120_000)
+        helper.readableDatabase.rawQuery("SELECT md5, peer FROM filepic", null).use { cursor ->
+            while (cursor.moveToNext()) out[cursor.getString(0)] = cursor.getString(1)
+        }
         helper.readableDatabase.rawQuery("SELECT md5, peer FROM pic", null).use { cursor ->
             while (cursor.moveToNext()) out[cursor.getString(0)] = cursor.getString(1)
         }
@@ -179,14 +282,22 @@ class ConversationIndex(context: Context) {
 
     fun indexed(): Int {
         val db = helper.readableDatabase
-        val byMd5 = db.rawQuery("SELECT COUNT(*) FROM pic", null).use { cursor ->
-            if (cursor.moveToFirst()) cursor.getInt(0) else 0
-        }
+        val byMd5 = db.rawQuery(
+            "SELECT COUNT(*) FROM (SELECT md5 FROM pic UNION SELECT md5 FROM filepic)",
+            null,
+        ).use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else 0 }
         val byName = db.rawQuery("SELECT COUNT(*) FROM named", null).use { cursor ->
             if (cursor.moveToFirst()) cursor.getInt(0) else 0
         }
         return byMd5 + byName
     }
+
+    /** md5s the file table supplied that the message scan did not. */
+    fun fileOnlyCount(): Int =
+        helper.readableDatabase.rawQuery(
+            "SELECT COUNT(*) FROM filepic WHERE md5 NOT IN (SELECT md5 FROM pic)",
+            null,
+        ).use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else 0 }
 
     /** How many cache names were filed by the path route. */
     fun namedCount(): Int =
@@ -199,7 +310,9 @@ class ConversationIndex(context: Context) {
         val out = ArrayList<Pair<String, Int>>()
         helper.readableDatabase.rawQuery(
             "SELECT peer, COUNT(*) AS n FROM (" +
-                "SELECT peer FROM pic UNION ALL SELECT peer FROM named" +
+                "SELECT md5, peer FROM pic " +
+                "UNION SELECT md5, peer FROM filepic " +
+                "UNION SELECT base, peer FROM named" +
                 ") GROUP BY peer ORDER BY n DESC",
             null,
         ).use { cursor -> while (cursor.moveToNext()) out.add(cursor.getString(0) to cursor.getInt(1)) }
@@ -251,7 +364,7 @@ class ConversationIndex(context: Context) {
         helper.readableDatabase.rawQuery("SELECT name FROM peer_name WHERE peer = ?", arrayOf(peer))
             .use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
 
-    private class Helper(context: Context) : SQLiteOpenHelper(context, "conversation.db", null, 2) {
+    private class Helper(context: Context) : SQLiteOpenHelper(context, "conversation.db", null, 3) {
         init {
             // The scan writes while the gallery reads; WAL keeps them apart.
             setWriteAheadLoggingEnabled(true)
@@ -273,12 +386,20 @@ class ConversationIndex(context: Context) {
                     "msgid INTEGER NOT NULL)",
             )
             db.execSQL("CREATE INDEX named_peer ON named(peer)")
+            db.execSQL(
+                "CREATE TABLE filepic(" +
+                    "md5 TEXT PRIMARY KEY, " +
+                    "peer TEXT NOT NULL, " +
+                    "time INTEGER NOT NULL)",
+            )
+            db.execSQL("CREATE INDEX filepic_peer ON filepic(peer)")
             db.execSQL("CREATE TABLE peer_name(peer TEXT PRIMARY KEY, name TEXT NOT NULL)")
         }
 
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
             // The index is expensive to build, so upgrades never drop it. Version 2
-            // adds the name route; its table starts empty and the next build fills it.
+            // adds the name route, version 3 the file-table route; both tables start
+            // empty and the next build fills them.
             if (oldVersion < 2) {
                 db.execSQL(
                     "CREATE TABLE IF NOT EXISTS named(" +
@@ -287,6 +408,15 @@ class ConversationIndex(context: Context) {
                         "msgid INTEGER NOT NULL)",
                 )
                 db.execSQL("CREATE INDEX IF NOT EXISTS named_peer ON named(peer)")
+            }
+            if (oldVersion < 3) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS filepic(" +
+                        "md5 TEXT PRIMARY KEY, " +
+                        "peer TEXT NOT NULL, " +
+                        "time INTEGER NOT NULL)",
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS filepic_peer ON filepic(peer)")
             }
         }
     }
