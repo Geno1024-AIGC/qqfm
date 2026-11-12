@@ -82,6 +82,8 @@ class ConversationIndexer(
         val conversations: Int,
         /** True when the build was skipped because the token still matched. */
         val cached: Boolean = false,
+        /** True when the message pass continued from a stored watermark. */
+        val resumed: Boolean = false,
     )
 
     sealed interface Outcome {
@@ -112,6 +114,17 @@ class ConversationIndexer(
         // in weight, and the progress bar has to know that before this build can
         // count them again.
         val previous = conversations.metaAll()
+
+        // Where the last build stopped in each message table, so this one can
+        // continue instead of re-reading years of rows. Empty on a first build (or
+        // after a forced one), which is what makes the pass a full scan.
+        val resume = previous.mapNotNull { (key, value) ->
+            val table = key.removePrefix(WATERMARK_PREFIX)
+            if (table == key) null else value.toLongOrNull()?.let { table to it }
+        }.toMap()
+
+        /** A number the last build stored, or 0 when this is the first one. */
+        fun prior(key: String): Long = previous[key]?.toLongOrNull() ?: 0L
 
         val items = repository.loadCached(MediaSource.RAW)
             ?: repository.scan(MediaSource.RAW).items
@@ -145,7 +158,13 @@ class ConversationIndexer(
 
         val bounds = NtdbTool.messageBounds(context, target)
         val order = listOf("group_msg_table", "c2c_msg_table").filter { it in bounds }
-        val weights = tableWeights(previous, order)
+        // Where each table's scan starts: its first row, or the message id an earlier
+        // build stopped at.
+        val starts = order.associateWith { table ->
+            val span = bounds.getValue(table)
+            (resume[table] ?: span.first).coerceIn(span.first, span.last)
+        }
+        val weights = tableWeights(previous, bounds, starts)
         val weightSum = weights.values.sum().takeIf { it > 0 } ?: 1.0
         val weightBefore = HashMap<String, Double>(4)
         run {
@@ -157,23 +176,29 @@ class ConversationIndexer(
         }
 
         val filed = conversations.rebuildFrom(
-            target, needed, localBases, context,
+            target, needed, localBases, context, resume,
         ) { scanned, found, table, msgid ->
-            val span = bounds[table]
-            val within = if (span != null && span.last > span.first) {
-                ((msgid - span.first).toDouble() / (span.last - span.first)).coerceIn(0.0, 1.0)
+            // The reader ends the stream with an empty table name: the pass is over.
+            if (table.isEmpty()) {
+                onPhase(Phase.ReadingMessages("", scanned, found, 1f))
             } else {
-                0.0
+                val span = bounds[table]
+                val start = starts[table]
+                val within = if (span != null && start != null && span.last > start) {
+                    ((msgid - start).toDouble() / (span.last - start)).coerceIn(0.0, 1.0)
+                } else {
+                    1.0
+                }
+                val fraction = (weightBefore[table] ?: 0.0) + within * (weights[table] ?: 0.0)
+                onPhase(
+                    Phase.ReadingMessages(
+                        table = table,
+                        scanned = scanned,
+                        matched = found,
+                        fraction = (fraction / weightSum).toFloat().coerceIn(0f, 1f),
+                    ),
+                )
             }
-            val fraction = (weightBefore[table] ?: 0.0) + within * (weights[table] ?: 0.0)
-            onPhase(
-                Phase.ReadingMessages(
-                    table = table,
-                    scanned = scanned,
-                    matched = found,
-                    fraction = (fraction / weightSum).toFloat().coerceIn(0f, 1f),
-                ),
-            )
         }
 
         // A second, independent md5 → conversation table. On a real library this one
@@ -194,10 +219,13 @@ class ConversationIndexer(
             files = items.size,
             hashed = needed.size,
             indexed = peers.sumOf { it.second },
-            named = filed.fromPath,
-            fromNames = filed.fromMd5,
+            // `named` only knows the names this run discovered; the rows filed by
+            // earlier runs are still in the table, so their counts carry over.
+            named = filed.fromPath + (if (resume.isEmpty()) 0 else prior("result.named").toInt()),
+            fromNames = filed.fromMd5 + (if (resume.isEmpty()) 0 else prior("result.fromNames").toInt()),
             fromFiles = conversations.fileOnlyCount(),
             conversations = peers.size,
+            resumed = resume.isNotEmpty(),
         )
         conversations.putMeta(
             buildMap {
@@ -210,7 +238,14 @@ class ConversationIndexer(
                 put("result.fromFiles", result.fromFiles.toString())
                 put("result.conversations", result.conversations.toString())
                 put("scan.files", filesScanned.toString())
-                filed.rowsByTable.forEach { (table, rows) -> put("rows.$table", rows.toString()) }
+                // Row counts accumulate for the same reason, and only ever grow: they
+                // exist to weigh one table against the other on the bar.
+                filed.rowsByTable.forEach { (table, rows) ->
+                    put("rows.$table", ((if (resume.isEmpty()) 0 else prior("rows.$table")) + rows).toString())
+                }
+                filed.watermark.forEach { (table, at) ->
+                    put("$WATERMARK_PREFIX$table", at.toString())
+                }
                 treeSizes.forEach { (id, size) -> put("tree.$id", size.toString()) }
             },
         )
@@ -223,12 +258,24 @@ class ConversationIndexer(
      * Row counts from the last build are exact. On the first build they are unknown —
      * counting them costs a full decrypt-and-scan — so the split measured on a real
      * library stands in, and is replaced by the real numbers as soon as this build
-     * finishes.
+     * finishes. Only the stretch still to be read weighs in, so a table that is
+     * already caught up does not hold a share of the bar it will never fill.
      */
-    private fun tableWeights(previous: Map<String, String>, order: List<String>): Map<String, Double> {
-        val rows = order.associateWith { previous["rows.$it"]?.toLongOrNull() ?: 0L }
-        if (rows.values.any { it > 0 }) return rows.mapValues { it.value.toDouble() }
-        return mapOf("group_msg_table" to 0.96, "c2c_msg_table" to 0.04)
+    private fun tableWeights(
+        previous: Map<String, String>,
+        bounds: Map<String, LongRange>,
+        starts: Map<String, Long>,
+    ): Map<String, Double> {
+        val rows = starts.keys.associateWith { previous["rows.$it"]?.toLongOrNull() ?: 0L }
+        if (rows.values.none { it > 0 }) {
+            return mapOf("group_msg_table" to 0.96, "c2c_msg_table" to 0.04)
+        }
+        return rows.mapValues { (table, count) ->
+            val span = bounds[table] ?: return@mapValues count.toDouble()
+            val full = (span.last - span.first).coerceAtLeast(1).toDouble()
+            val left = (span.last - (starts[table] ?: span.first)).coerceAtLeast(0).toDouble()
+            count.toDouble() * (left / full)
+        }
     }
 
     /**
@@ -328,5 +375,11 @@ class ConversationIndexer(
          * rebuilt instead of being trusted by the cache token.
          */
         const val INDEX_VERSION = 1
+
+        /**
+         * Meta key prefix for "this table was read up to this message id". The suffix
+         * is the table name, so `wm.group_msg_table` sorts next to `rows.…`.
+         */
+        const val WATERMARK_PREFIX = "wm."
     }
 }

@@ -41,6 +41,12 @@ class ConversationIndex(context: Context) {
         val fromMd5: Int,
         /** Rows each message table held, so the next build's bar knows their weight. */
         val rowsByTable: Map<String, Long>,
+        /**
+         * The last message id read from each table that was scanned, to continue
+         * from next time. A table whose scan found nothing new keeps its old value
+         * because it is simply absent here.
+         */
+        val watermark: Map<String, Long>,
     )
 
     /**
@@ -66,21 +72,31 @@ class ConversationIndex(context: Context) {
      *
      * Pairs are filed under the earliest message that carried them: a picture is
      * "from" the conversation it first appeared in, not the latest forward.
+     *
+     * [resume] turns the pass incremental: each entry continues a table at the
+     * message id an earlier build stopped at, and the rows already filed are kept
+     * rather than re-stated. Message ids increase with time, so a watermark never
+     * hides a message that was there before — but a picture that only *now* became
+     * known (QQ downloaded its original later) sits behind a watermark that already
+     * passed it. That case is what the "force rebuild" button is for.
      */
     fun rebuildFrom(
         target: NtdbTool.Target,
         needed: Set<String>,
         localBases: Set<String>,
         context: Context,
+        resume: Map<String, Long> = emptyMap(),
         onProgress: (scanned: Long, matched: Int, table: String, msgid: Long) -> Unit =
             { _, _, _, _ -> },
     ): Filed {
         val db = helper.writableDatabase
         db.beginTransaction()
         try {
-            db.execSQL("DELETE FROM pic")
-            db.execSQL("DELETE FROM named")
-            db.execSQL("DELETE FROM filepic")
+            if (resume.isEmpty()) {
+                db.execSQL("DELETE FROM pic")
+                db.execSQL("DELETE FROM named")
+                db.execSQL("DELETE FROM filepic")
+            }
             db.setTransactionSuccessful()
         } finally {
             db.endTransaction()
@@ -135,13 +151,15 @@ class ConversationIndex(context: Context) {
         var fromPath = 0
         var fromMd5 = 0
         val rowsByTable = HashMap<String, Long>()
+        val watermark = HashMap<String, Long>(4)
 
         try {
             db.beginTransaction()
             try {
-                NtdbTool.forEachPic(context, target) { row ->
+                NtdbTool.forEachPic(context, target, resume) { row ->
                     scanned++
                     rowsByTable.merge(row.table, 1L, Long::plus)
+                    watermark[row.table] = row.msgid
                     if (row.md5 in needed) {
                         insert.bindString(1, row.md5)
                         insert.bindString(2, row.peer)
@@ -204,7 +222,7 @@ class ConversationIndex(context: Context) {
             replaceNamed.close()
         }
         onProgress(scanned, matched, "", 0L)
-        return Filed(fromPath, fromMd5, rowsByTable)
+        return Filed(fromPath, fromMd5, rowsByTable, watermark)
     }
 
     /** One row of `files_in_chat_table`'s picture records. */

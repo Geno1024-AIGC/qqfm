@@ -170,10 +170,13 @@ fun AboutScreen(
                 is ConversationIndexer.Outcome.Failed -> "❌ ${outcome.message}"
                 is ConversationIndexer.Outcome.Done -> {
                     val r = outcome.result
-                    val head = if (r.cached) {
-                        "✅ 已是最新：QQ 的两个库和图片缓存都没有变化，这次没有重扫。"
-                    } else {
-                        "✅ chatraw ${r.files} 张，算出 md5 ${r.hashed} 张；"
+                    val head = when {
+                        r.cached ->
+                            "✅ 已是最新：QQ 的两个库和图片缓存都没有变化，这次没有重扫。"
+                        r.resumed ->
+                            "✅ 增量更新（只扫了新消息）："
+                        else ->
+                            "✅ chatraw ${r.files} 张，算出 md5 ${r.hashed} 张；"
                     }
                     head + "对上会话 ${r.indexed} 张（文件库补充 ${r.fromFiles} 张、" +
                         "图片/缩略图按文件名 ${r.fromNames} 条、" +

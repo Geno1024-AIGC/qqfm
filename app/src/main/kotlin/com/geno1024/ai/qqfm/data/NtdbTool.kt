@@ -137,12 +137,24 @@ object NtdbTool {
      *
      * Columns are `table msgid peer sender elem md5 filename size`; `elem` is the
      * element type (2 = picture, 3 = video or file, 4 = voice).
+     *
+     * [since] starts a table at the given message id instead of at its first row,
+     * so a scan that already read up to there does not have to be repeated. The
+     * tables are read in id order, which is what makes a watermark safe.
      */
-    fun forEachPic(context: Context, target: Target, action: (PicRow) -> Unit) {
+    fun forEachPic(
+        context: Context,
+        target: Target,
+        since: Map<String, Long> = emptyMap(),
+        action: (PicRow) -> Unit,
+    ) {
         val bin = binary(context) ?: return
+        val from = since.entries.joinToString("") { (table, msgid) ->
+            " --since ${q("$table=$msgid")}"
+        }
         RootShell.forEachLine(
-            "${q(bin.absolutePath)} --md5key ${target.md5Key} ${q(target.dbPath)} --pics " +
-                "2>/dev/null",
+            "${q(bin.absolutePath)} --md5key ${target.md5Key} ${q(target.dbPath)}" +
+                " --pics$from 2>/dev/null",
         ) { line ->
             val row = PicRow.parse(line) ?: return@forEachLine
             action(row)
