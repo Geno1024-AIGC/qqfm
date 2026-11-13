@@ -42,6 +42,7 @@ IMG_MD5 = "28e13060375d9b8e2f95960f578e6eae"
 IMG2_MD5 = "0f4b1c7a9d3e5268b0ac41d7e93f2a51"
 VID_MD5 = "5a6b7c8d9e0f1a2b3c4d5e6f70819a2b"
 NOISE_MD5 = "0123456789abcdef0123456789abcdef"  # must never be extracted
+OTHER_MD5 = "9c2b7d41f0a83e56b1d47c2805ea63f9"  # f45424 on a row where it differs
 
 
 def _varint(v: int) -> bytes:
@@ -63,7 +64,8 @@ def _f_bytes(fn: int, payload: bytes) -> bytes:
 
 
 def picture_body(md5hex: str, name: str, elem: int = 2,
-                 with_hex_field: bool = True) -> bytes:
+                 with_hex_field: bool = True,
+                 hex_md5: str | None = None) -> bytes:
     parts = [
         _f_var(45002, elem),
         _f_bytes(45402, name.encode()),
@@ -71,7 +73,9 @@ def picture_body(md5hex: str, name: str, elem: int = 2,
         _f_var(45405, 1199),
     ]
     if with_hex_field:
-        parts.append(_f_bytes(45424, md5hex.upper().encode()))
+        # f45424 is a second digest, not a re-encoding of f45406: QQ names the
+        # cache file after f45406, so a divergent f45424 must not win.
+        parts.append(_f_bytes(45424, (hex_md5 or md5hex).upper().encode()))
     # nested noise: a 32-hex string in a field the extractor must not read
     parts.append(_f_bytes(45600, _f_bytes(1, b"x" * 10)))
     return _f_bytes(40800, b"".join(parts))
@@ -166,8 +170,11 @@ def build_plain(path: str) -> None:
             run(f"INSERT INTO {table} VALUES {values}")
 
         insert_msgs("group_msg_table", [
+            # f45424 carries a *different* md5 here, as it does on 8.8% of a
+            # live library's image rows: f45406 is the one the cache uses.
             (1001, 2, "761140305",
-             picture_body(IMG_MD5, IMG_MD5.upper() + ".png")),
+             picture_body(IMG_MD5, IMG_MD5.upper() + ".png",
+                          hex_md5=OTHER_MD5)),
             (1002, 5, None, text_body()),
             # video: no f45424 — exercises the raw f45406 fallback
             (1003, 3, "761140305",

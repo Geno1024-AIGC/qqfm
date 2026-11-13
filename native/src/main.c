@@ -167,7 +167,7 @@ static void usage(void)
  * 40800 = one outer length-delimited field 40800 wrapping the element list.
  * A picture element carries f40010 (element type), f45402 (file name =
  * md5 + extension), f45406 (raw 16-byte md5), f45405 (byte size) and
- * f45424 (md5 as 32 hex chars — authoritative when present). Text messages
+ * f45424 (a second md5 as 32 hex chars, often a different one). Text messages
  * carry none of these, which is what keeps hex-looking authkeys out.
  */
 struct pic_info {
@@ -247,11 +247,16 @@ static void scan_element(const unsigned char *b, size_t n, struct pic_info *p)
             if (varint_at(b, n, &i, &len) || len > n - i) return;
             val = b + i;
             i += (size_t)len;
-            if (fn == 45424 && len == 32 && is_hex(val, 32)) {
-                lower_copy(p->md5, val, 32);
-                p->have = 1;
-            } else if (fn == 45406 && len == 16 && !p->have) {
+            /* f45406 is the digest QQ writes into the cache file name, so it wins
+             * whenever it is present. f45424 is a *second* digest: on 212,875 of
+             * 2,421,837 media rows measured on a live library it holds a different
+             * md5, and there the file is named after f45406 — preferring f45424
+             * loses those pictures. f45424 only covers the rows without f45406. */
+            if (fn == 45406 && len == 16) {
                 hex_encode(val, 16, p->md5);
+                p->have = 1;
+            } else if (fn == 45424 && len == 32 && is_hex(val, 32) && !p->have) {
+                lower_copy(p->md5, val, 32);
                 p->have = 1;
             } else if (fn == 45402 && len && len < sizeof(p->name)) {
                 for (k = 0; k < len; k++) {

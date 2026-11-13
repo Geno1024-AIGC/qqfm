@@ -428,9 +428,10 @@ class ConversationIndexer(
         /**
          * Bumped when the meaning of a stored link changes, so an old index is
          * rebuilt instead of being trusted by the cache token. Version 2 adds the
-         * sender to the name route.
+         * sender to the name route; version 3 names pictures by the digest the
+         * message actually carries (f45406, not the second one in f45424).
          */
-        const val INDEX_VERSION = 2
+        const val INDEX_VERSION = 3
 
         /**
          * Meta key prefix for "this table was read up to this message id". The suffix

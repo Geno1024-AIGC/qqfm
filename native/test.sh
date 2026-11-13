@@ -79,8 +79,8 @@ echo "$ROWS"
 echo "$ROWS" | tail -1 | grep -q "^400$" || { echo "FAIL: message count" >&2; exit 1; }
 
 echo "== picture extraction =="
-# image via f45424 (authoritative hex), video via f45406 fallback, and the
-# text message's md5-shaped noise must not be extracted.
+# image via f45406 even when f45424 disagrees, video via f45406, and the text
+# message's md5-shaped noise must not be extracted.
 PICS=$(./build/ntdbread-host --md5key "$MD5KEY" "$FIXTURE" --pics 2>/dev/null)
 echo "$PICS"
 pic_row() {  # pic_row table msgid peer sender elem md5 filename size
@@ -99,7 +99,9 @@ END {exit !(NR>0 && rows==3)}' || { echo "FAIL: pics header/row count" >&2; exit
 
 pic_row group_msg_table 1001 761140305 u_SENDER 2 28e13060375d9b8e2f95960f578e6eae \
     28E13060375D9B8E2F95960F578E6EAE.png 1199 \
-    || { echo "FAIL: image row (f45424)" >&2; exit 1; }
+    || { echo "FAIL: image row (f45406 wins over f45424)" >&2; exit 1; }
+printf '%s\n' "$PICS" | grep -q "9c2b7d41f0a83e56b1d47c2805ea63f9" \
+    && { echo "FAIL: f45424 leaked into the md5 column" >&2; exit 1; }
 pic_row group_msg_table 1003 761140305 u_SENDER 3 5a6b7c8d9e0f1a2b3c4d5e6f70819a2b \
     5A6B7C8D9E0F1A2B3C4D5E6F70819A2B.mp4 1199 \
     || { echo "FAIL: video row (f45406 fallback)" >&2; exit 1; }
