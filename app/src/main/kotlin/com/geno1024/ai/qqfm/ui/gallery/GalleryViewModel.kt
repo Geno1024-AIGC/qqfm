@@ -221,7 +221,15 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 // may point at any of the three trees, and the names never collide.
                 peers[base] = conversation.peer
                 names[conversation.peer] = conversation.name
-                labels[base] = conversation.name
+                // The viewer names the conversation and, when the index knows it, the
+                // person who sent the picture. In a one-to-one chat those are the same
+                // name, which the second half would only repeat.
+                val sender = conversation.senderName
+                labels[base] = if (sender.isEmpty() || sender == conversation.name) {
+                    conversation.name
+                } else {
+                    "${conversation.name} · $sender"
+                }
             }
             peerOfItem = peers
             nameOfPeer = names

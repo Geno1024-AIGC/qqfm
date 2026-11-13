@@ -213,7 +213,9 @@ class ConversationIndexer(
 
         onPhase(Phase.Naming)
         val peers = conversations.peers()
-        conversations.namePeers(target, context, peers.map { it.first })
+        // Senders share the name table with the conversations: both are uids, and the
+        // gallery shows them side by side ("from <group> · <nickname>").
+        conversations.namePeers(target, context, peers.map { it.first } + conversations.senders())
 
         val result = Result(
             files = items.size,
@@ -323,10 +325,22 @@ class ConversationIndexer(
     }
 
     /** md5 → conversation for every indexed picture. */
-    fun peersByMd5(): Map<String, String> = conversations.allPeers()
+    fun peersByMd5(): Map<String, String> =
+        conversations.allPeers().mapValues { (_, link) -> link.peer }
 
-    /** A conversation a picture belongs to, and how to show it. */
-    data class Conversation(val peer: String, val name: String)
+    /**
+     * A conversation a picture belongs to, and how to show it.
+     *
+     * [sender] is the uid that sent the message this link came from, `senderName` the
+     * nickname for it. Both are empty when only the file table knew the picture, and
+     * `senderName` is empty when no nickname for that uid is on the device.
+     */
+    data class Conversation(
+        val peer: String,
+        val name: String,
+        val sender: String = "",
+        val senderName: String = "",
+    )
 
     /**
      * Every indexed picture base (`Cache_` stripped) with the conversation it came
@@ -339,21 +353,27 @@ class ConversationIndexer(
         val names = HashMap<String, String>()
         val out = HashMap<String, Conversation>(400_000)
 
-        fun put(base: String, peer: String) {
+        fun put(base: String, link: ConversationIndex.Link) {
+            val peer = link.peer
             val name = names.getOrPut(peer) { nameOf(peer) ?: peer }
-            out[base] = Conversation(peer, name)
+            val senderName = if (link.sender.isEmpty()) {
+                ""
+            } else {
+                names.getOrPut(link.sender) { nameOf(link.sender) ?: "" }
+            }
+            out[base] = Conversation(peer, name, link.sender, senderName)
         }
 
         // The name routes cover `chatimg`/`chatthumb` (both the copies a message
         // named itself and the ones QQ named after the md5); the md5 route covers
         // what `chatraw` kept. Where both know a base, the named one is the direct
         // statement, so it wins.
-        conversations.allNamed().forEach { (base, peer) -> put(base, peer) }
+        conversations.allNamed().forEach { (base, link) -> put(base, link) }
         val peers = conversations.allPeers()
         if (peers.isNotEmpty()) {
             md5ByBase().forEach { (base, md5) ->
-                val peer = peers[md5] ?: return@forEach
-                if (base !in out) put(base, peer)
+                val link = peers[md5] ?: return@forEach
+                if (base !in out) put(base, link)
             }
         }
         return out
@@ -372,9 +392,10 @@ class ConversationIndexer(
     private companion object {
         /**
          * Bumped when the meaning of a stored link changes, so an old index is
-         * rebuilt instead of being trusted by the cache token.
+         * rebuilt instead of being trusted by the cache token. Version 2 adds the
+         * sender to the name route.
          */
-        const val INDEX_VERSION = 1
+        const val INDEX_VERSION = 2
 
         /**
          * Meta key prefix for "this table was read up to this message id". The suffix

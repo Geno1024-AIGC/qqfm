@@ -114,10 +114,10 @@ class ConversationIndex(context: Context) {
             "UPDATE pic SET peer = ?, msgid = ?, sender = ? WHERE md5 = ? AND msgid > ?",
         )
         val insertNamed = db.compileStatement(
-            "INSERT OR IGNORE INTO named(base, peer, msgid) VALUES(?, ?, ?)",
+            "INSERT OR IGNORE INTO named(base, peer, msgid, sender) VALUES(?, ?, ?, ?)",
         )
         val replaceNamed = db.compileStatement(
-            "UPDATE named SET peer = ?, msgid = ? WHERE base = ? AND msgid > ?",
+            "UPDATE named SET peer = ?, msgid = ?, sender = ? WHERE base = ? AND msgid > ?",
         )
 
         fun bumpBatch() {
@@ -129,11 +129,18 @@ class ConversationIndex(context: Context) {
             }
         }
 
-        /** Files [base] under [peer]; true when that is a name the index did not have. */
-        fun name(base: String, peer: String, msgid: Long): Boolean {
+        /**
+         * Files [base] under [peer], sent by [sender]; true when that is a name the
+         * index did not have.
+         *
+         * The sender rides along on the same row because it is the message that says
+         * both, and the gallery shows them together.
+         */
+        fun name(base: String, peer: String, msgid: Long, sender: String): Boolean {
             insertNamed.bindString(1, base)
             insertNamed.bindString(2, peer)
             insertNamed.bindLong(3, msgid)
+            insertNamed.bindString(4, sender)
             // INSERT OR IGNORE reports -1 when the name is already there.
             if (insertNamed.executeInsert() >= 0) {
                 bumpBatch()
@@ -141,8 +148,9 @@ class ConversationIndex(context: Context) {
             }
             replaceNamed.bindString(1, peer)
             replaceNamed.bindLong(2, msgid)
-            replaceNamed.bindString(3, base)
-            replaceNamed.bindLong(4, msgid)
+            replaceNamed.bindString(3, sender)
+            replaceNamed.bindString(4, base)
+            replaceNamed.bindLong(5, msgid)
             replaceNamed.execute()
             bumpBatch()
             return false
@@ -182,7 +190,7 @@ class ConversationIndex(context: Context) {
                     // is 3 on these, so this is deliberately outside the check above.
                     val base = row.path?.substringAfterLast('/', "")?.removePrefix("Cache_")
                     if (!base.isNullOrEmpty() && base in localBases) {
-                        if (name(base, row.peer, row.msgid)) fromPath++
+                        if (name(base, row.peer, row.msgid, row.sender)) fromPath++
                         matched++
                     }
 
@@ -194,7 +202,7 @@ class ConversationIndex(context: Context) {
                     for (tree in CacheName.TREES) {
                         val derived = CacheName.of(tree, row.md5) ?: continue
                         if (derived in localBases) {
-                            if (name(derived, row.peer, row.msgid)) fromMd5++
+                            if (name(derived, row.peer, row.msgid, row.sender)) fromMd5++
                             matched++
                         }
                         // Most thumbnails are written with an `_hd` suffix, and that
@@ -203,7 +211,7 @@ class ConversationIndex(context: Context) {
                         if (tree == MediaSource.THUMB) {
                             val hd = derived + "_hd"
                             if (hd in localBases) {
-                                if (name(hd, row.peer, row.msgid)) fromMd5++
+                                if (name(hd, row.peer, row.msgid, row.sender)) fromMd5++
                                 matched++
                             }
                         }
@@ -324,6 +332,15 @@ class ConversationIndex(context: Context) {
             .use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
 
     /**
+     * One picture → conversation link: who sent it and which message carried it.
+     *
+     * [sender] is empty for the file table, which records a conversation but not a
+     * person. [at] is the message id, except on that same route where it is the time
+     * QQ recorded for the file; both exist to keep the earliest statement of a link.
+     */
+    data class Link(val peer: String, val sender: String, val at: Long)
+
+    /**
      * Every indexed md5 and its conversation, read in one pass.
      *
      * Grouping a tree asks about a hundred thousand pictures at once; one query per
@@ -332,13 +349,22 @@ class ConversationIndex(context: Context) {
      * The message scan is read last so it wins where both routes know a md5: it
      * carries the sender and a real message id, which the file table lacks.
      */
-    fun allPeers(): Map<String, String> {
-        val out = HashMap<String, String>(120_000)
-        helper.readableDatabase.rawQuery("SELECT md5, peer FROM filepic", null).use { cursor ->
-            while (cursor.moveToNext()) out[cursor.getString(0)] = cursor.getString(1)
+    fun allPeers(): Map<String, Link> {
+        val out = HashMap<String, Link>(120_000)
+        helper.readableDatabase.rawQuery(
+            "SELECT md5, peer, time FROM filepic", null,
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                out[cursor.getString(0)] = Link(cursor.getString(1), "", cursor.getLong(2))
+            }
         }
-        helper.readableDatabase.rawQuery("SELECT md5, peer FROM pic", null).use { cursor ->
-            while (cursor.moveToNext()) out[cursor.getString(0)] = cursor.getString(1)
+        helper.readableDatabase.rawQuery(
+            "SELECT md5, peer, sender, msgid FROM pic", null,
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                out[cursor.getString(0)] =
+                    Link(cursor.getString(1), cursor.getString(2), cursor.getLong(3))
+            }
         }
         return out
     }
@@ -378,11 +404,30 @@ class ConversationIndex(context: Context) {
      * the files a sent-from-here message named itself, and the `chatimg`/`chatthumb`
      * copies whose names QQ derived from the picture's md5.
      */
-    fun allNamed(): Map<String, String> {
-        val out = HashMap<String, String>(200_000)
-        helper.readableDatabase.rawQuery("SELECT base, peer FROM named", null).use { cursor ->
-            while (cursor.moveToNext()) out[cursor.getString(0)] = cursor.getString(1)
+    fun allNamed(): Map<String, Link> {
+        val out = HashMap<String, Link>(200_000)
+        helper.readableDatabase.rawQuery(
+            "SELECT base, peer, sender, msgid FROM named", null,
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                out[cursor.getString(0)] =
+                    Link(cursor.getString(1), cursor.getString(2), cursor.getLong(3))
+            }
         }
+        return out
+    }
+
+    /**
+     * Every uid the index knows as a *sender*, so the naming pass can resolve them
+     * to nicknames alongside the conversations themselves.
+     */
+    fun senders(): List<String> {
+        val out = ArrayList<String>(16_000)
+        helper.readableDatabase.rawQuery(
+            "SELECT sender FROM pic WHERE sender <> '' " +
+                "UNION SELECT sender FROM named WHERE sender <> ''",
+            null,
+        ).use { cursor -> while (cursor.moveToNext()) out.add(cursor.getString(0)) }
         return out
     }
 
@@ -470,7 +515,7 @@ class ConversationIndex(context: Context) {
         helper.readableDatabase.rawQuery("SELECT name FROM peer_name WHERE peer = ?", arrayOf(peer))
             .use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
 
-    private class Helper(context: Context) : SQLiteOpenHelper(context, "conversation.db", null, 4) {
+    private class Helper(context: Context) : SQLiteOpenHelper(context, "conversation.db", null, 5) {
         init {
             // The scan writes while the gallery reads; WAL keeps them apart.
             setWriteAheadLoggingEnabled(true)
@@ -489,7 +534,8 @@ class ConversationIndex(context: Context) {
                 "CREATE TABLE named(" +
                     "base TEXT PRIMARY KEY, " +
                     "peer TEXT NOT NULL, " +
-                    "msgid INTEGER NOT NULL)",
+                    "msgid INTEGER NOT NULL, " +
+                    "sender TEXT NOT NULL DEFAULT '')",
             )
             db.execSQL("CREATE INDEX named_peer ON named(peer)")
             db.execSQL(
@@ -506,7 +552,8 @@ class ConversationIndex(context: Context) {
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
             // The index is expensive to build, so upgrades never drop it. Version 2
             // adds the name route, version 3 the file-table route, version 4 the
-            // cache token; every new table starts empty and the next build fills it.
+            // cache token, version 5 the sender on the name route; every new table
+            // starts empty and the next build fills it.
             if (oldVersion < 2) {
                 db.execSQL(
                     "CREATE TABLE IF NOT EXISTS named(" +
@@ -529,6 +576,22 @@ class ConversationIndex(context: Context) {
                 db.execSQL(
                     "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)",
                 )
+            }
+            if (oldVersion < 5) {
+                // Every existing row keeps an empty sender, so a reader can tell "the
+                // message scan filled this" from "only the name route did". Checked
+                // rather than assumed: a half-finished upgrade must not fail here for
+                // ever, and SQLite has no `ADD COLUMN IF NOT EXISTS`.
+                var has = false
+                db.rawQuery("PRAGMA table_info(named)", null).use { cursor ->
+                    val name = cursor.getColumnIndex("name")
+                    while (cursor.moveToNext()) {
+                        if (cursor.getString(name) == "sender") has = true
+                    }
+                }
+                if (!has) {
+                    db.execSQL("ALTER TABLE named ADD COLUMN sender TEXT NOT NULL DEFAULT ''")
+                }
             }
         }
     }
