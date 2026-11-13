@@ -80,6 +80,8 @@ class ConversationIndexer(
         /** Links only the file table knew. */
         val fromFiles: Int,
         val conversations: Int,
+        /** When this build finished, Unix millis; 0 for a result built before it was stored. */
+        val at: Long = 0L,
         /** True when the build was skipped because the token still matched. */
         val cached: Boolean = false,
         /** True when the message pass continued from a stored watermark. */
@@ -235,6 +237,7 @@ class ConversationIndexer(
             fromNames = filed.fromMd5 + (if (resume.isEmpty()) 0 else prior("result.fromNames").toInt()),
             fromFiles = conversations.fileOnlyCount(),
             conversations = peers.size,
+            at = System.currentTimeMillis(),
             resumed = resume.isNotEmpty(),
         )
         conversations.putMeta(
@@ -250,6 +253,7 @@ class ConversationIndexer(
                 put("result.fromNames", result.fromNames.toString())
                 put("result.fromFiles", result.fromFiles.toString())
                 put("result.conversations", result.conversations.toString())
+                put("build.time", result.at.toString())
                 put("scan.files", filesScanned.toString())
                 // Row counts accumulate for the same reason, and only ever grow: they
                 // exist to weigh one table against the other on the bar.
@@ -319,9 +323,23 @@ class ConversationIndexer(
     private fun stored(token: String): Result? {
         val meta = conversations.metaAll()
         if (meta["build.token"] != token) return null
-        // A build from before the last INDEX_VERSION bump stored links under the old
-        // meaning, and its token would not have moved if only the code changed.
         if (meta["build.version"]?.toIntOrNull() != INDEX_VERSION) return null
+        return readResult(meta)?.copy(cached = true)
+    }
+
+    /**
+     * What the last build left behind, for a page that wants to show the index's
+     * standing numbers before anything is run. Null when nothing has been built under
+     * the current [INDEX_VERSION].
+     */
+    fun lastResult(): Result? {
+        val meta = conversations.metaAll()
+        if (meta["build.version"]?.toIntOrNull() != INDEX_VERSION) return null
+        return readResult(meta)
+    }
+
+    /** The numbers a build stored, or null when it stored none. */
+    private fun readResult(meta: Map<String, String>): Result? {
         // A cleared index leaves the token behind; the counts are what say whether
         // there is anything to reuse.
         val indexed = meta["result.indexed"]?.toIntOrNull() ?: return null
@@ -334,9 +352,12 @@ class ConversationIndexer(
             fromNames = meta["result.fromNames"]?.toIntOrNull() ?: 0,
             fromFiles = meta["result.fromFiles"]?.toIntOrNull() ?: 0,
             conversations = meta["result.conversations"]?.toIntOrNull() ?: 0,
-            cached = true,
+            at = meta["build.time"]?.toLongOrNull() ?: 0L,
         )
     }
+
+    /** How many indexed pictures know who sent them. */
+    fun senderCount(): Int = conversations.senderCount()
 
     /** md5 → conversation for every indexed picture. */
     fun peersByMd5(): Map<String, String> =

@@ -59,6 +59,8 @@ import com.geno1024.ai.qqfm.data.OcrScanProgress
 import com.geno1024.ai.qqfm.data.OcrScanStatus
 import com.geno1024.ai.qqfm.ocr.formatDuration
 import com.geno1024.ai.qqfm.ui.formatBytes
+import com.geno1024.ai.qqfm.ui.formatGrouped
+import com.geno1024.ai.qqfm.ui.formatTimestamp
 import com.geno1024.ai.qqfm.ui.update.UpdatesSection
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -139,6 +141,29 @@ fun AboutScreen(
     var indexReport by remember { mutableStateOf<String?>(null) }
     val indexScope = rememberCoroutineScope()
 
+    /** The numbers a result carries, worded so a run and a stored result read alike. */
+    fun sums(r: ConversationIndexer.Result, senders: Int): String =
+        "chatraw ${formatGrouped(r.files.toLong())} 张、算出 md5 ${formatGrouped(r.hashed.toLong())} 张，" +
+            "对上会话 ${formatGrouped(r.indexed.toLong())} 张（文件库补充 " +
+            "${formatGrouped(r.fromFiles.toLong())} 张、图片/缩略图按文件名 " +
+            "${formatGrouped(r.fromNames.toLong())} 条、消息自带路径 " +
+            "${formatGrouped(r.named.toLong())} 条），分布在 " +
+            "${formatGrouped(r.conversations.toLong())} 个会话，其中 " +
+            "${formatGrouped(senders.toLong())} 张知道发送者"
+
+    // The build stores its numbers in the index itself, so opening the page shows the
+    // standing result instead of an empty card that only fills in after a run.
+    LaunchedEffect(Unit) {
+        val (last, senders) = withContext(Dispatchers.IO) {
+            indexer.lastResult() to indexer.senderCount()
+        }
+        // Only fills a card that a run has not already written into.
+        if (last != null && indexReport == null) {
+            val stamp = if (last.at > 0) "上次建立于 ${formatTimestamp(last.at)}：" else "上次建立："
+            indexReport = "📇 $stamp" + sums(last, senders) + "。"
+        }
+    }
+
     // The build runs for minutes on the first pass, so the card shows the same kind
     // of bar the OCR pass has: a fraction plus how long it has been going.
     var indexTick by remember { mutableLongStateOf(0L) }
@@ -176,11 +201,11 @@ fun AboutScreen(
                         r.resumed ->
                             "✅ 增量更新（只扫了新消息）："
                         else ->
-                            "✅ chatraw ${r.files} 张，算出 md5 ${r.hashed} 张；"
+                            "✅ 全量重建："
                     }
-                    head + "对上会话 ${r.indexed} 张（文件库补充 ${r.fromFiles} 张、" +
-                        "图片/缩略图按文件名 ${r.fromNames} 条、" +
-                        "消息自带路径 ${r.named} 条），分布在 ${r.conversations} 个会话"
+                    val senders = withContext(Dispatchers.IO) { indexer.senderCount() }
+                    val stamp = if (r.at > 0) "。完成于 ${formatTimestamp(r.at)}" else ""
+                    head + sums(r, senders) + stamp
                 }
             }
         }

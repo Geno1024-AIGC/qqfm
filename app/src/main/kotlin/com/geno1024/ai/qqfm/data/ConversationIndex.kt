@@ -443,6 +443,16 @@ class ConversationIndex(context: Context) {
         return byMd5 + byName
     }
 
+    /** How many indexed pictures know who sent them. */
+    fun senderCount(): Int =
+        helper.readableDatabase.rawQuery(
+            "SELECT COUNT(*) FROM (" +
+                "SELECT md5 FROM pic WHERE sender <> '' " +
+                "UNION SELECT base FROM named WHERE sender <> ''" +
+                ")",
+            null,
+        ).use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else 0 }
+
     /** md5s the file table supplied that the message scan did not. */
     fun fileOnlyCount(): Int =
         helper.readableDatabase.rawQuery(
