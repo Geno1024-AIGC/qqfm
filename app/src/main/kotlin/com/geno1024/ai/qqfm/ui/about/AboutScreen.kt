@@ -507,6 +507,15 @@ fun AboutScreen(
                         }
                     }
                 }
+                if (!indexRunning) {
+                    Text(
+                        text = "「建立会话索引」只在 QQ 的库或图片缓存变了时重扫，并从上次读到的" +
+                            "消息继续；「强制重建」清空水位线，两条消息表从第一条重新读一遍，" +
+                            "耗时最久，只在怀疑有漏时才用。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 phase?.let { current ->
                     if (current != ConversationIndexer.Phase.Unchanged) {
                         LinearProgressIndicator(

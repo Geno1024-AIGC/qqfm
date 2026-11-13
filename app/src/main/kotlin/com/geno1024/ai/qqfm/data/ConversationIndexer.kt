@@ -95,7 +95,9 @@ class ConversationIndexer(
      * Runs the whole chain. Blocking: call it from an IO thread.
      *
      * Pass [force] to rebuild even when nothing changed; otherwise a matching token
-     * returns the numbers the last build reported without touching the device.
+     * returns the numbers the last build reported without touching the device. A
+     * forced run also drops the watermarks, so it rescans both message tables from
+     * their first message instead of continuing where the last build stopped.
      */
     fun build(force: Boolean = false, onPhase: (Phase) -> Unit = {}): Outcome {
         onPhase(Phase.Locating)
@@ -116,12 +118,18 @@ class ConversationIndexer(
         val previous = conversations.metaAll()
 
         // Where the last build stopped in each message table, so this one can
-        // continue instead of re-reading years of rows. Empty on a first build (or
-        // after a forced one), which is what makes the pass a full scan.
-        val resume = previous.mapNotNull { (key, value) ->
-            val table = key.removePrefix(WATERMARK_PREFIX)
-            if (table == key) null else value.toLongOrNull()?.let { table to it }
-        }.toMap()
+        // continue instead of re-reading years of rows. Empty on a first build, after
+        // a forced one — and after a change to [INDEX_VERSION], because the rows those
+        // watermarks skipped were written with the old meaning of a link.
+        val sameVersion = previous["build.version"]?.toIntOrNull() == INDEX_VERSION
+        val resume = if (force || !sameVersion) {
+            emptyMap()
+        } else {
+            previous.mapNotNull { (key, value) ->
+                val table = key.removePrefix(WATERMARK_PREFIX)
+                if (table == key) null else value.toLongOrNull()?.let { table to it }
+            }.toMap()
+        }
 
         /** A number the last build stored, or 0 when this is the first one. */
         fun prior(key: String): Long = previous[key]?.toLongOrNull() ?: 0L
@@ -232,6 +240,9 @@ class ConversationIndexer(
         conversations.putMeta(
             buildMap {
                 put("build.token", token)
+                // Says which meaning the stored links have; a bump of INDEX_VERSION
+                // makes the next build ignore the watermarks and start over.
+                put("build.version", INDEX_VERSION.toString())
                 put("result.files", result.files.toString())
                 put("result.hashed", result.hashed.toString())
                 put("result.indexed", result.indexed.toString())
@@ -308,6 +319,9 @@ class ConversationIndexer(
     private fun stored(token: String): Result? {
         val meta = conversations.metaAll()
         if (meta["build.token"] != token) return null
+        // A build from before the last INDEX_VERSION bump stored links under the old
+        // meaning, and its token would not have moved if only the code changed.
+        if (meta["build.version"]?.toIntOrNull() != INDEX_VERSION) return null
         // A cleared index leaves the token behind; the counts are what say whether
         // there is anything to reuse.
         val indexed = meta["result.indexed"]?.toIntOrNull() ?: return null
