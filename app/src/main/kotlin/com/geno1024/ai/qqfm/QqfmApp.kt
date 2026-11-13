@@ -114,6 +114,7 @@ fun QqfmApp(viewModel: GalleryViewModel = viewModel()) {
                         start = start,
                         imageStore = viewModel.imageStore,
                         frozenIds = state.frozen,
+                        conversationOf = state.conversationOf,
                         onClose = { viewerId = null },
                         onDelete = { item, index ->
                             viewerAnchor = index

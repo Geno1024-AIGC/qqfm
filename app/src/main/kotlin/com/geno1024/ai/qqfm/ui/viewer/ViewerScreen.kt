@@ -71,6 +71,7 @@ import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -91,6 +92,8 @@ fun ViewerScreen(
     start: MediaItem,
     imageStore: ImageStore,
     frozenIds: Set<String>,
+    /** Cache name → conversation name; empty when nothing is placed yet. */
+    conversationOf: Map<String, String>,
     onClose: () -> Unit,
     onDelete: (MediaItem, Int) -> Unit,
     onToggleFrozen: (MediaItem) -> Unit,
@@ -450,6 +453,19 @@ fun ViewerScreen(
                             )
                             .padding(horizontal = 12.dp, vertical = 8.dp),
                     ) {
+                        val conversation = conversationOf[item.base]
+                        if (conversation != null) {
+                            // Where the picture was sent, when the index knows: the
+                            // grid can group by conversation, but a full-screen look
+                            // had no way to say which one it is.
+                            Text(
+                                text = "来自 $conversation",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = Color.White,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
                         // One line keeps a picture's info bar to the height of the
                         // gradient; a video's path is the only way to tell which
                         // file it came from, so it wraps instead of being eaten.

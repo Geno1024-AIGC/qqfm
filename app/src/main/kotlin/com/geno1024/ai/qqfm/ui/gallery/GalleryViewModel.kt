@@ -70,6 +70,14 @@ data class GalleryUiState(
     val scannedCount: Int = 0,
     val sources: Set<MediaSource> = emptySet(),
     val items: List<MediaItem> = emptyList(),
+    /**
+     * Cache name → conversation name, for the pictures the index has placed.
+     *
+     * Keyed by [MediaItem.base] rather than by id so the viewer can label a picture
+     * no matter which tree it was opened from. A missing entry is simply a picture
+     * the index does not know, which is why the field is a map and not a list.
+     */
+    val conversationOf: Map<String, String> = emptyMap(),
     val totalBytes: Long = 0L,
     val sortMode: SortMode = SortMode.TIME_DESC,
     val collapsed: Set<String> = emptySet(),
@@ -207,14 +215,19 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             val byBase = withContext(Dispatchers.IO) { conversations.conversationsByBase() }
             val peers = HashMap<String, String>(byBase.size * 2)
             val names = HashMap<String, String>()
+            val labels = HashMap<String, String>(byBase.size * 2)
             byBase.forEach { (base, conversation) ->
                 // Keyed by cache name, not by tree: a message that names its own file
                 // may point at any of the three trees, and the names never collide.
                 peers[base] = conversation.peer
                 names[conversation.peer] = conversation.name
+                labels[base] = conversation.name
             }
             peerOfItem = peers
             nameOfPeer = names
+            // Published with the state so the viewer can name the conversation of the
+            // picture being looked at, not only the grouping headers.
+            _state.update { it.copy(conversationOf = labels) }
             if (_state.value.sortMode == SortMode.CONVERSATION) republish()
         }
     }
