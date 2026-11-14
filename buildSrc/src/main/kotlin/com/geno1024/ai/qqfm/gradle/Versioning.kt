@@ -2,13 +2,14 @@ package com.geno1024.ai.qqfm.gradle
 
 import org.gradle.api.Project
 import java.io.File
+import java.io.RandomAccessFile
 
 /**
  * A build stamp of the form `<base>.<env>.<pack>.<sha1>`, currently `0.2.…`.
  *
- * [base] is the functional version and only moves when the app's capabilities do;
- * [env] is the commit count, [pack] the number of packaging runs and [sha1] the short
- * commit id. Only [env] is ordered — see [Versioning.env].
+ * [env] is the build's position in the release stream and the only ordered field;
+ * [pack] counts packaging builds of the module; [sha1] ties the artifact to its
+ * source revision.
  */
 data class Stamp(
     val env: String,
@@ -28,15 +29,21 @@ data class Stamp(
 object Versioning {
     private val NO_HEAD = "00000000"
 
-    private val ANDROID_PACKAGING = setOf(
-        "assembleDebug", "assembleRelease", "bundleDebug", "bundleRelease",
+    /**
+     * Task-name prefixes that produce a distributable. Matching by prefix rather
+     * than by exact name keeps flavour variants (`assembleFreeRelease`) and the
+     * `install*` path in the count.
+     */
+    private val PACKAGING_PREFIXES = listOf(
+        "assemble", "bundle", "package", "install",
+        "jar", "shadowJar", "dist", "publish",
     )
 
     /**
-     * Aggregates that reach a packaging task transitively, so that a plain `build`
-     * still counts as a packaging event for the Android modules.
+     * `build` is an aggregate worth counting, but as a prefix it would also
+     * catch `buildEnvironment`.
      */
-    private val AGGREGATE = setOf("build", "assemble")
+    private val PACKAGING_EXACT = setOf("build")
 
     fun stamp(root: File, moduleDir: File): Stamp = Stamp(
         env = env(root),
@@ -63,32 +70,57 @@ object Versioning {
 
     fun packFile(moduleDir: File) = File(moduleDir, "count.pack")
 
-    private fun packOf(moduleDir: File): String =
-        packFile(moduleDir).readText().trim().ifEmpty { "0" }
-
-    /**
-     * Increments `<module>/count.pack` when this session requests packaging of the module.
-     *
-     * The bump is a side effect of a packaging event, so the value stamped into the
-     * current build is the count of *previously* completed events. Rebuilding from a
-     * clean checkout of a given commit therefore reproduces the same `<pack>`.
-     *
-     * Which also means the file has to be committed for the number to move: CI checks
-     * out a fresh tree every run and throws its own bump away, so a `<pack>` that is
-     * never committed stamps the same value into every release.
-     */
-    fun bumpOnPackaging(project: Project, moduleDir: File, android: Boolean) {
-        val names = if (android) ANDROID_PACKAGING else ANDROID_PACKAGING
-        val requested = project.gradle.startParameter.taskNames.map { it.substringAfterLast(':') }
-        if (requested.any { names.contains(it) || AGGREGATE.contains(it) }) {
-            incrementPack(moduleDir)
-        }
+    private fun packOf(moduleDir: File): String {
+        val file = packFile(moduleDir)
+        return if (file.exists()) file.readText().trim().ifEmpty { "0" } else "0"
     }
 
+    /**
+     * Counts this session's packaging build of the module.
+     *
+     * Call it before [stamp], so the artifact carries its own one-based number and
+     * the file equals the number of packaging builds that have happened.
+     *
+     * The count is taken at configuration time, which is why it records *requests*
+     * and not successes: a build that fails to compile, cannot sign or is
+     * interrupted after configuration already has its number. Query-only tasks
+     * (`tasks`, `help`, …) and `--dry-run` stay out. `-Ppack.bump=true|false`
+     * forces the counter on or off; CI skips it by default, because an increment
+     * that is never written back would invent a number nobody has seen.
+     */
+    fun bumpOnPackaging(project: Project, moduleDir: File) {
+        val params = project.gradle.startParameter
+        if (params.isDryRun) return
+        val forced = params.projectProperties["pack.bump"]?.toBoolean()
+        if (forced == false) return
+        if (forced == null && !System.getenv("CI").isNullOrEmpty()) return
+        if (params.taskNames.none(::requestsPackaging)) return
+        incrementPack(moduleDir)
+    }
+
+    private fun requestsPackaging(taskName: String): Boolean {
+        val name = taskName.substringAfterLast(':')
+        return name in PACKAGING_EXACT || PACKAGING_PREFIXES.any(name::startsWith)
+    }
+
+    /**
+     * Serialised through a file lock: two builds of the same checkout would read
+     * the same value and the later write would swallow the earlier increment.
+     */
     private fun incrementPack(moduleDir: File) {
         val file = packFile(moduleDir)
-        val current = file.readText().trim().toIntOrNull() ?: 0
-        file.writeText("${current + 1}\n")
+        file.parentFile?.mkdirs()
+        RandomAccessFile(file, "rw").use { raf ->
+            raf.channel.lock().use {
+                val bytes = ByteArray(raf.length().toInt())
+                raf.seek(0L)
+                raf.readFully(bytes)
+                val current = String(bytes, Charsets.UTF_8).trim().toIntOrNull() ?: 0
+                raf.setLength(0L)
+                raf.seek(0L)
+                raf.write("${current + 1}\n".toByteArray())
+            }
+        }
     }
 
     private fun git(root: File, vararg args: String): String? = try {
