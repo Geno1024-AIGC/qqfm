@@ -30,20 +30,19 @@ object Versioning {
     private val NO_HEAD = "00000000"
 
     /**
-     * Task-name prefixes that produce a distributable. Matching by prefix rather
-     * than by exact name keeps flavour variants (`assembleFreeRelease`) and the
-     * `install*` path in the count.
-     */
-    private val PACKAGING_PREFIXES = listOf(
-        "assemble", "bundle", "package", "install",
-        "jar", "shadowJar", "dist", "publish",
-    )
-
-    /**
-     * `build` is an aggregate worth counting, but as a prefix it would also
+     * `build` is an aggregate every module has, but as a prefix it would also
      * catch `buildEnvironment`.
      */
     private val PACKAGING_EXACT = setOf("build")
+
+    /** Android: every variant reaches the APK/AAB through one of these. */
+    private val ANDROID_PACKAGING_PREFIXES = listOf("assemble", "bundle", "package", "install")
+
+    /** JVM: exact names only, so that a bare `assembleDebug` does not count. */
+    private val JVM_PACKAGING_EXACT = setOf("assemble", "jar", "installDist", "distTar", "distZip")
+
+    /** JVM: names that only ever appear with a suffix. */
+    private val JVM_PACKAGING_PREFIXES = listOf("shadowJar", "dist", "publish")
 
     fun stamp(root: File, moduleDir: File): Stamp = Stamp(
         env = env(root),
@@ -94,13 +93,43 @@ object Versioning {
         val forced = params.projectProperties["pack.bump"]?.toBoolean()
         if (forced == false) return
         if (forced == null && !System.getenv("CI").isNullOrEmpty()) return
-        if (params.taskNames.none(::requestsPackaging)) return
+        if (params.taskNames.none { requestsPackaging(project, it) }) return
         incrementPack(moduleDir)
     }
 
-    private fun requestsPackaging(taskName: String): Boolean {
+    /**
+     * Whether [taskName], as requested on the command line, packages anything
+     * here.
+     *
+     * A qualified name (`:git-core:jar`) belongs to one module only, and every
+     * module sees the same `taskNames`, so without the path check a JVM module's
+     * jar would also bump the app's counter. A bare name (`assembleDebug`) is how
+     * Gradle asks every module that has the task, so it counts in each of them —
+     * provided the module actually has such a task, see [packagesAnything].
+     */
+    private fun requestsPackaging(project: Project, taskName: String): Boolean {
         val name = taskName.substringAfterLast(':')
-        return name in PACKAGING_EXACT || PACKAGING_PREFIXES.any(name::startsWith)
+        if (!packagesAnything(project, name)) return false
+        if (!taskName.contains(':')) return true
+        val path = taskName.removePrefix(":")
+        val owner = if (path.contains(':')) ":" + path.substringBeforeLast(':') else ":"
+        return owner == project.path
+    }
+
+    /**
+     * Android and JVM modules package through different task names. A bare
+     * `assembleDebug` exists only for the former, so treating `assemble*` as a
+     * prefix everywhere would charge JVM modules for builds they never run.
+     */
+    private fun packagesAnything(project: Project, name: String): Boolean {
+        if (name in PACKAGING_EXACT) return true
+        val android = project.plugins.hasPlugin("com.android.application") ||
+            project.plugins.hasPlugin("com.android.library")
+        return if (android) {
+            ANDROID_PACKAGING_PREFIXES.any(name::startsWith)
+        } else {
+            name in JVM_PACKAGING_EXACT || JVM_PACKAGING_PREFIXES.any(name::startsWith)
+        }
     }
 
     /**
