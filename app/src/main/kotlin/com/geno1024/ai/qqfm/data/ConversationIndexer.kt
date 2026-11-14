@@ -94,6 +94,10 @@ class ConversationIndexer(
         val videoThumbs: Int = 0,
         /** Thumbnails filed under the md5 their message carries. */
         val videoThumbLinks: Int = 0,
+        /** Pictures in `chatimg` / `chatthumb`, by tree id. */
+        val picturesByTree: Map<String, Int> = emptyMap(),
+        /** Files in those trees the index links to a conversation, by tree id. */
+        val pictureLinks: Map<String, Int> = emptyMap(),
         /** When this build finished, Unix millis; 0 for a result built before it was stored. */
         val at: Long = 0L,
         /** True when the build was skipped because the token still matched. */
@@ -258,6 +262,15 @@ class ConversationIndexer(
         val videoLinks = videoItems.count { it.source.indexKey(it.base) in namedKeys }
         val videoThumbLinks = videoThumbItems.count { it.source.indexKey(it.base) in namedKeys }
 
+        // The picture trees were only read for their names during the message pass.
+        // The other direction — how many of their files the index can show — is one
+        // streamed count per tree, which keeps three 150k-file listings out of
+        // memory. A null (no cached listing) leaves that tree's number out.
+        val pictureTrees = listOf(MediaSource.IMG, MediaSource.THUMB)
+        val pictureLinks = pictureTrees.mapNotNull { source ->
+            repository.countCached(source, namedKeys)?.let { source.id to it }
+        }.toMap()
+
         val result = Result(
             files = items.size,
             hashed = needed.size,
@@ -272,6 +285,10 @@ class ConversationIndexer(
             videoLinks = videoLinks,
             videoThumbs = videoThumbItems.size,
             videoThumbLinks = videoThumbLinks,
+            picturesByTree = treeSizes.filterKeys { id ->
+                id == MediaSource.IMG.id || id == MediaSource.THUMB.id
+            },
+            pictureLinks = pictureLinks,
             at = System.currentTimeMillis(),
             resumed = resume.isNotEmpty(),
         )
@@ -292,6 +309,7 @@ class ConversationIndexer(
                 put("result.videoLinks", result.videoLinks.toString())
                 put("result.videoThumbs", result.videoThumbs.toString())
                 put("result.videoThumbLinks", result.videoThumbLinks.toString())
+                result.pictureLinks.forEach { (id, links) -> put("result.links.$id", links.toString()) }
                 put("build.time", result.at.toString())
                 put("scan.files", filesScanned.toString())
                 // Row counts accumulate for the same reason, and only ever grow: they
@@ -403,6 +421,19 @@ class ConversationIndexer(
                 meta["result.videoThumbLinks"]?.toIntOrNull() ?: 0
             } else {
                 0
+            },
+            // Sizes come from the listing counts every build already stores; the
+            // per-tree link counts arrived with the about-page rebuild, so a result
+            // stored before them simply has fewer rows.
+            picturesByTree = buildMap {
+                listOf(MediaSource.IMG, MediaSource.THUMB).forEach { source ->
+                    meta["tree.${source.id}"]?.toIntOrNull()?.let { put(source.id, it) }
+                }
+            },
+            pictureLinks = buildMap {
+                listOf(MediaSource.IMG, MediaSource.THUMB).forEach { source ->
+                    meta["result.links.${source.id}"]?.toIntOrNull()?.let { put(source.id, it) }
+                }
             },
             at = meta["build.time"]?.toLongOrNull() ?: 0L,
         )

@@ -73,6 +73,36 @@ class MediaRepository(
     }
 
     /**
+     * Counts cached entries of [source] whose index key is in [keys], streaming the
+     * listing instead of building items.
+     *
+     * The conversation index learns the picture trees' file names while it reads the
+     * messages, but it needs the size of each tree and how many of its files it can
+     * link afterwards. Re-reading three ~150k-line listings is cheap and keeps only
+     * the names it already has in memory; null means there is no cache to read.
+     */
+    fun countCached(source: MediaSource, keys: Set<String>): Int? {
+        if (!keepIndex()) return null
+        val file = cacheFile(source)
+        if (!file.exists() || file.length() == 0L) return null
+        return runCatching {
+            val deleted = deletedIds(source)
+            var count = 0
+            file.forEachLine { line ->
+                val firstTab = line.indexOf('\t')
+                if (firstTab <= 0) return@forEachLine
+                val secondTab = line.indexOf('\t', firstTab + 1)
+                if (secondTab <= firstTab) return@forEachLine
+                val base = line.substring(firstTab + 1, secondTab)
+                if (source.indexKey(base) !in keys) return@forEachLine
+                if (deleted.isNotEmpty() && "${source.id}/$base" in deleted) return@forEachLine
+                count++
+            }
+            count
+        }.getOrNull()
+    }
+
+    /**
      * Records that [ids] are gone, without rewriting the index.
      *
      * The index is a few megabytes for a large directory, and rewriting all of it to

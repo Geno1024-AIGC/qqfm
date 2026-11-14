@@ -53,6 +53,7 @@ import androidx.core.content.ContextCompat
 import com.geno1024.ai.qqfm.BuildConfig
 import com.geno1024.ai.qqfm.data.ConversationIndexer
 import com.geno1024.ai.qqfm.data.MediaRepository
+import com.geno1024.ai.qqfm.data.MediaSource
 import com.geno1024.ai.qqfm.data.OcrScanProgress
 import com.geno1024.ai.qqfm.data.OcrScanStatus
 import com.geno1024.ai.qqfm.ocr.formatDuration
@@ -144,26 +145,40 @@ fun AboutScreen(
         headline: String,
         detail: String,
     ): IndexSummary {
+        /** "N 张（对上 M）", or just "N 张" when this result predates the count. */
+        fun coverage(size: Int?, links: Int?, unit: String): String? {
+            size ?: return null
+            val count = "${formatGrouped(size.toLong())} $unit"
+            return if (links != null) "$count（对上 ${formatGrouped(links.toLong())}）" else count
+        }
         val facts = buildList {
-            add("chatraw" to "${formatGrouped(r.files.toLong())} 张")
-            add("算出 md5" to "${formatGrouped(r.hashed.toLong())} 张")
-            add("对上会话" to "${formatGrouped(r.indexed.toLong())} 张")
-            add("文件库补充" to "${formatGrouped(r.fromFiles.toLong())} 张")
-            add("按文件名对上" to "${formatGrouped(r.fromNames.toLong())} 条")
-            add("消息自带路径" to "${formatGrouped(r.named.toLong())} 条")
+            // chatraw is the tree whose bytes hash to the message's md5; the other
+            // two are re-encoded copies whose *names* still lead back, so they are
+            // listed next to it rather than folded into one "chatraw" line.
+            add(
+                MediaSource.RAW.id to "${formatGrouped(r.files.toLong())} 张" +
+                    "（算出 md5 ${formatGrouped(r.hashed.toLong())}）",
+            )
+            coverage(
+                r.picturesByTree[MediaSource.IMG.id],
+                r.pictureLinks[MediaSource.IMG.id],
+                "张",
+            )?.let { add(MediaSource.IMG.id to it) }
+            coverage(
+                r.picturesByTree[MediaSource.THUMB.id],
+                r.pictureLinks[MediaSource.THUMB.id],
+                "张",
+            )?.let { add(MediaSource.THUMB.id to it) }
             // A result built by the release that added video links but not their
             // counts reports none of them; saying "0 个" there would be a wrong
             // number, not a missing one.
             if (r.videos > 0 || r.videoThumbs > 0) {
-                add(
-                    "shortvideo 视频" to "${formatGrouped(r.videos.toLong())} 个" +
-                        "（对上 ${formatGrouped(r.videoLinks.toLong())}）",
-                )
-                add(
-                    "视频缩略图" to "${formatGrouped(r.videoThumbs.toLong())} 个" +
-                        "（对上 ${formatGrouped(r.videoThumbLinks.toLong())}）",
-                )
+                coverage(r.videos, r.videoLinks, "个")?.let { add("shortvideo 视频" to it) }
+                coverage(r.videoThumbs, r.videoThumbLinks, "个")?.let { add("视频缩略图" to it) }
             }
+            add("对上会话" to "${formatGrouped(r.indexed.toLong())} 张")
+            add("文件库补充" to "${formatGrouped(r.fromFiles.toLong())} 张")
+            add("消息自带路径" to "${formatGrouped(r.named.toLong())} 条")
             add("涉及会话" to "${formatGrouped(r.conversations.toLong())} 个")
             add("知道发送者" to "${formatGrouped(senders.toLong())} 张")
         }
