@@ -453,7 +453,7 @@ fun ViewerScreen(
                             )
                             .padding(horizontal = 12.dp, vertical = 8.dp),
                     ) {
-                        val conversation = conversationOf[item.base]
+                        val conversation = conversationOf[item.source.indexKey(item.base)]
                         if (conversation != null) {
                             // Where the picture was sent, when the index knows: the
                             // grid can group by conversation, but a full-screen look

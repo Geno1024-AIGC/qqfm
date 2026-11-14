@@ -73,6 +73,20 @@ enum class MediaSource(val id: String, val dir: String) {
     fun baseOf(name: String): String =
         if (this == IMG || this == RAW || this == THUMB) name.removePrefix("Cache_") else name
 
+    /**
+     * The key the conversation index files this tree's [base] under.
+     *
+     * The picture trees keep the name QQ derived from the message's md5 verbatim.
+     * A video is stored as `<md5>.mp4` and its frame as `<md5>_0.png`, so both are
+     * reduced to the md5 — lower-case, the way the database writes it — which is
+     * the one key a video and its thumbnail share with the message.
+     */
+    fun indexKey(base: String): String = when (this) {
+        VIDEO -> MediaPaths.videoKey(base).lowercase()
+        VIDEO_THUMB -> MediaPaths.videoThumbKey(base).lowercase()
+        else -> base
+    }
+
     companion object {
         fun from(id: String?): MediaSource? = entries.firstOrNull { it.id == id }
     }

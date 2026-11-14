@@ -754,7 +754,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     }
 
     /** The conversation peer of an item, or empty when the index does not know it. */
-    private fun peerOf(item: MediaItem): String = peerOfItem[item.base].orEmpty()
+    private fun peerOf(item: MediaItem): String =
+        peerOfItem[item.source.indexKey(item.base)].orEmpty()
 
     private fun sort(items: List<MediaItem>, mode: SortMode): List<MediaItem> {
         val comparator = when (mode) {

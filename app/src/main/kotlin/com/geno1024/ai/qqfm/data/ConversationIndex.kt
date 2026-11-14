@@ -39,6 +39,8 @@ class ConversationIndex(context: Context) {
     data class Filed(
         val fromPath: Int,
         val fromMd5: Int,
+        /** Videos filed because QQ names them after the message's md5. */
+        val fromVideo: Int,
         /** Rows each message table held, so the next build's bar knows their weight. */
         val rowsByTable: Map<String, Long>,
         /**
@@ -69,6 +71,11 @@ class ConversationIndex(context: Context) {
      *    hash to that md5. This is the wide route: on a real library it links 81,997
      *    `chatimg` and 86,754 `chatthumb` files that the md5 route cannot see at
      *    all, because those pictures were never downloaded as originals.
+     *  - [localBases] by video name: `shortvideo/<md5>.mp4` and
+     *    `shortvideo/thumb/<md5>_0.png` carry the message's md5 as their name, so a
+     *    video is filed under that md5 ([MediaSource.indexKey]). Measured over the
+     *    message database, 93.7% of the video elements name their own file
+     *    `<md5>.mp4`; the rest keep whatever name the sender's client wrote.
      *
      * Pairs are filed under the earliest message that carried them: a picture is
      * "from" the conversation it first appeared in, not the latest forward.
@@ -158,6 +165,7 @@ class ConversationIndex(context: Context) {
 
         var fromPath = 0
         var fromMd5 = 0
+        var fromVideo = 0
         val rowsByTable = HashMap<String, Long>()
         val watermark = HashMap<String, Long>(4)
 
@@ -217,6 +225,19 @@ class ConversationIndex(context: Context) {
                         }
                     }
 
+                    // A video keeps the message's md5 as its own name — that is what
+                    // `shortvideo/<md5>.mp4` and `shortvideo/thumb/<md5>_0.png` are —
+                    // so the md5 is the key, not a derived one. Element type 5 is the
+                    // video element; type 3 is a file attachment that may also be an
+                    // mp4, but those live elsewhere and are left alone.
+                    if (row.elem == 5) {
+                        val key = row.md5.lowercase()
+                        if (key in localBases) {
+                            if (name(key, row.peer, row.msgid, row.sender)) fromVideo++
+                            matched++
+                        }
+                    }
+
                     if (scanned % 20_000 == 0L) onProgress(scanned, matched, row.table, row.msgid)
                 }
                 db.setTransactionSuccessful()
@@ -230,7 +251,7 @@ class ConversationIndex(context: Context) {
             replaceNamed.close()
         }
         onProgress(scanned, matched, "", 0L)
-        return Filed(fromPath, fromMd5, rowsByTable, watermark)
+        return Filed(fromPath, fromMd5, fromVideo, rowsByTable, watermark)
     }
 
     /** One row of `files_in_chat_table`'s picture records. */
@@ -401,8 +422,9 @@ class ConversationIndex(context: Context) {
 
     /**
      * Every cache name (without `Cache_`) the name routes filed a conversation for:
-     * the files a sent-from-here message named itself, and the `chatimg`/`chatthumb`
-     * copies whose names QQ derived from the picture's md5.
+     * the files a sent-from-here message named itself, the `chatimg`/`chatthumb`
+     * copies whose names QQ derived from the picture's md5, and the `shortvideo`
+     * files whose md5 is the message's own.
      */
     fun allNamed(): Map<String, Link> {
         val out = HashMap<String, Link>(200_000)

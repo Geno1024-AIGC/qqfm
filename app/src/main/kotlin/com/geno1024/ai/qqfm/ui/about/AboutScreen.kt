@@ -147,7 +147,9 @@ fun AboutScreen(
             "对上会话 ${formatGrouped(r.indexed.toLong())} 张（文件库补充 " +
             "${formatGrouped(r.fromFiles.toLong())} 张、图片/缩略图按文件名 " +
             "${formatGrouped(r.fromNames.toLong())} 条、消息自带路径 " +
-            "${formatGrouped(r.named.toLong())} 条），分布在 " +
+            "${formatGrouped(r.named.toLong())} 条），shortvideo " +
+            "${formatGrouped(r.videos.toLong())} 个视频里按 md5 对上 " +
+            "${formatGrouped(r.videoLinks.toLong())} 个，分布在 " +
             "${formatGrouped(r.conversations.toLong())} 个会话，其中 " +
             "${formatGrouped(senders.toLong())} 张知道发送者"
 

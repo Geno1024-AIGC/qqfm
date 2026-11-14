@@ -36,6 +36,12 @@ class ConversationIndexer(
     private val conversations = ConversationIndex(context)
 
     /**
+     * Every tree the name routes look in: the picture trees, whose names are derived
+     * from the md5, and the two video trees, whose names are the md5 itself.
+     */
+    private val nameTrees = CacheName.TREES + listOf(MediaSource.VIDEO, MediaSource.VIDEO_THUMB)
+
+    /**
      * What the build is doing right now.
      *
      * Each state carries enough for the about page to fill a progress bar without
@@ -80,6 +86,10 @@ class ConversationIndexer(
         /** Links only the file table knew. */
         val fromFiles: Int,
         val conversations: Int,
+        /** Videos in `shortvideo`. */
+        val videos: Int = 0,
+        /** Videos filed under the md5 their message carries. */
+        val videoLinks: Int = 0,
         /** When this build finished, Unix millis; 0 for a result built before it was stored. */
         val at: Long = 0L,
         /** True when the build was skipped because the token still matched. */
@@ -150,20 +160,23 @@ class ConversationIndexer(
         val needed = items.mapNotNullTo(HashSet()) { item -> cache[item.base]?.md5 }
         if (needed.isEmpty()) return Outcome.Failed("还没有任何图片的 md5 可对上消息")
 
-        // Every cache name on the device. `chatraw` is needed for the path route and
-        // the other two trees for the derived-name route, so all three are scanned
-        // once and cached; a picture the gallery cannot show is a link not worth
-        // storing.
-        val localBases = HashSet<String>(400_000)
+        // Every name the name routes can file: the picture trees, whose names are
+        // derived from the md5 ([CacheName]), and the two video trees, whose names
+        // *are* the md5. A video the gallery cannot show is a link not worth storing.
+        val localBases = HashSet<String>(450_000)
         items.mapTo(localBases) { it.base }
-        val treeSizes = HashMap<String, Int>(4)
-        CacheName.TREES.forEach { source ->
+        val treeSizes = HashMap<String, Int>(8)
+        var videos = 0
+        nameTrees.forEach { source ->
             val prior = previous["tree.${source.id}"]?.toIntOrNull() ?: 0
             val tree = repository.loadCached(source) ?: repository.scan(source) { done ->
                 onPhase(Phase.ReadingTrees(source, done, prior))
             }.items
-            tree.mapTo(localBases) { it.base }
+            // For a picture tree this is the cache name; for a video it is the md5
+            // shared by the video and its thumbnail.
+            tree.mapTo(localBases) { source.indexKey(it.base) }
             treeSizes[source.id] = tree.size
+            if (source == MediaSource.VIDEO) videos = tree.size
         }
 
         val bounds = NtdbTool.messageBounds(context, target)
@@ -237,6 +250,8 @@ class ConversationIndexer(
             fromNames = filed.fromMd5 + (if (resume.isEmpty()) 0 else prior("result.fromNames").toInt()),
             fromFiles = conversations.fileOnlyCount(),
             conversations = peers.size,
+            videos = videos,
+            videoLinks = filed.fromVideo + (if (resume.isEmpty()) 0 else prior("result.videoLinks").toInt()),
             at = System.currentTimeMillis(),
             resumed = resume.isNotEmpty(),
         )
@@ -253,6 +268,8 @@ class ConversationIndexer(
                 put("result.fromNames", result.fromNames.toString())
                 put("result.fromFiles", result.fromFiles.toString())
                 put("result.conversations", result.conversations.toString())
+                put("result.videos", result.videos.toString())
+                put("result.videoLinks", result.videoLinks.toString())
                 put("build.time", result.at.toString())
                 put("scan.files", filesScanned.toString())
                 // Row counts accumulate for the same reason, and only ever grow: they
@@ -314,7 +331,7 @@ class ConversationIndexer(
         return buildString {
             append("v$INDEX_VERSION|").append(sizes)
             append("|raw:").append(repository.stamp(MediaSource.RAW))
-            CacheName.TREES.forEach { append('|').append(it.id).append(':').append(repository.stamp(it)) }
+            nameTrees.forEach { append('|').append(it.id).append(':').append(repository.stamp(it)) }
             append("|hash:").append(hashes.stamp(MediaSource.RAW))
         }
     }
@@ -352,6 +369,8 @@ class ConversationIndexer(
             fromNames = meta["result.fromNames"]?.toIntOrNull() ?: 0,
             fromFiles = meta["result.fromFiles"]?.toIntOrNull() ?: 0,
             conversations = meta["result.conversations"]?.toIntOrNull() ?: 0,
+            videos = meta["result.videos"]?.toIntOrNull() ?: 0,
+            videoLinks = meta["result.videoLinks"]?.toIntOrNull() ?: 0,
             at = meta["build.time"]?.toLongOrNull() ?: 0L,
         )
     }
@@ -429,9 +448,10 @@ class ConversationIndexer(
          * Bumped when the meaning of a stored link changes, so an old index is
          * rebuilt instead of being trusted by the cache token. Version 2 adds the
          * sender to the name route; version 3 names pictures by the digest the
-         * message actually carries (f45406, not the second one in f45424).
+         * message actually carries (f45406, not the second one in f45424); version 4
+         * adds videos, which are filed under the md5 their file is named after.
          */
-        const val INDEX_VERSION = 3
+        const val INDEX_VERSION = 4
 
         /**
          * Meta key prefix for "this table was read up to this message id". The suffix
