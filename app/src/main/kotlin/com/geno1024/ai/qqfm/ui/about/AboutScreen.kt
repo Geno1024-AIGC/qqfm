@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -54,7 +53,6 @@ import androidx.core.content.ContextCompat
 import com.geno1024.ai.qqfm.BuildConfig
 import com.geno1024.ai.qqfm.data.ConversationIndexer
 import com.geno1024.ai.qqfm.data.MediaRepository
-import com.geno1024.ai.qqfm.data.NtdbProbe
 import com.geno1024.ai.qqfm.data.OcrScanProgress
 import com.geno1024.ai.qqfm.data.OcrScanStatus
 import com.geno1024.ai.qqfm.ocr.formatDuration
@@ -123,12 +121,6 @@ fun AboutScreen(
     }
     val elapsed = ocrScan.elapsedMillis(now)
 
-    // The probe talks to root and finishes in seconds; the report stays on screen
-    // so its numbers can be read off, selected and copied afterwards.
-    var probeRunning by remember { mutableStateOf(false) }
-    var probeReport by remember { mutableStateOf<String?>(null) }
-    val probeScope = rememberCoroutineScope()
-
     // Building the conversation index reads ~17 GB of pictures and every message
     // row; the phase comes through a flow so the callback can stay on the worker
     // thread instead of posting a recomposition per batch.
@@ -138,30 +130,44 @@ fun AboutScreen(
     val indexPhase = remember { MutableStateFlow<ConversationIndexer.Phase?>(null) }
     val phase by indexPhase.collectAsState()
     var indexRunning by remember { mutableStateOf(false) }
-    var indexReport by remember { mutableStateOf<String?>(null) }
+    var indexSummary by remember { mutableStateOf<IndexSummary?>(null) }
     val indexScope = rememberCoroutineScope()
 
-    /** The numbers a result carries, worded so a run and a stored result read alike. */
-    fun sums(r: ConversationIndexer.Result, senders: Int): String {
-        // A result built by the release that added video links but not their counts
-        // reports none of them; saying "0 个" there would be a wrong number, not a
-        // missing one.
-        val videos = if (r.videos > 0 || r.videoThumbs > 0) {
-            "，shortvideo 视频 ${formatGrouped(r.videos.toLong())} 个（对上 " +
-                "${formatGrouped(r.videoLinks.toLong())}）、缩略图 " +
-                "${formatGrouped(r.videoThumbs.toLong())} 个（对上 " +
-                "${formatGrouped(r.videoThumbLinks.toLong())}）"
-        } else {
-            ""
+    /**
+     * The numbers a build carries, shaped for the card: a headline, one line of
+     * context, and the counts as a table instead of one run-on sentence — the
+     * sentence grew a clause per release and was getting hard to read.
+     */
+    fun summaryOf(
+        r: ConversationIndexer.Result,
+        senders: Int,
+        headline: String,
+        detail: String,
+    ): IndexSummary {
+        val facts = buildList {
+            add("chatraw" to "${formatGrouped(r.files.toLong())} 张")
+            add("算出 md5" to "${formatGrouped(r.hashed.toLong())} 张")
+            add("对上会话" to "${formatGrouped(r.indexed.toLong())} 张")
+            add("文件库补充" to "${formatGrouped(r.fromFiles.toLong())} 张")
+            add("按文件名对上" to "${formatGrouped(r.fromNames.toLong())} 条")
+            add("消息自带路径" to "${formatGrouped(r.named.toLong())} 条")
+            // A result built by the release that added video links but not their
+            // counts reports none of them; saying "0 个" there would be a wrong
+            // number, not a missing one.
+            if (r.videos > 0 || r.videoThumbs > 0) {
+                add(
+                    "shortvideo 视频" to "${formatGrouped(r.videos.toLong())} 个" +
+                        "（对上 ${formatGrouped(r.videoLinks.toLong())}）",
+                )
+                add(
+                    "视频缩略图" to "${formatGrouped(r.videoThumbs.toLong())} 个" +
+                        "（对上 ${formatGrouped(r.videoThumbLinks.toLong())}）",
+                )
+            }
+            add("涉及会话" to "${formatGrouped(r.conversations.toLong())} 个")
+            add("知道发送者" to "${formatGrouped(senders.toLong())} 张")
         }
-        return "chatraw ${formatGrouped(r.files.toLong())} 张、算出 md5 " +
-            "${formatGrouped(r.hashed.toLong())} 张，对上会话 " +
-            "${formatGrouped(r.indexed.toLong())} 张（文件库补充 " +
-            "${formatGrouped(r.fromFiles.toLong())} 张、图片/缩略图按文件名 " +
-            "${formatGrouped(r.fromNames.toLong())} 条、消息自带路径 " +
-            "${formatGrouped(r.named.toLong())} 条）$videos，分布在 " +
-            "${formatGrouped(r.conversations.toLong())} 个会话，其中 " +
-            "${formatGrouped(senders.toLong())} 张知道发送者"
+        return IndexSummary(headline = headline, ok = true, detail = detail, facts = facts)
     }
 
     // The build stores its numbers in the index itself, so opening the page shows the
@@ -171,9 +177,17 @@ fun AboutScreen(
             indexer.lastResult() to indexer.senderCount()
         }
         // Only fills a card that a run has not already written into.
-        if (last != null && indexReport == null) {
-            val stamp = if (last.at > 0) "上次建立于 ${formatTimestamp(last.at)}：" else "上次建立："
-            indexReport = "📇 $stamp" + sums(last, senders) + "。"
+        if (last != null && indexSummary == null) {
+            indexSummary = summaryOf(
+                last,
+                senders,
+                headline = "上次建立的索引",
+                detail = if (last.at > 0) {
+                    "上次建立于 ${formatTimestamp(last.at)}"
+                } else {
+                    "上次建立"
+                },
+            )
         }
     }
 
@@ -197,28 +211,41 @@ fun AboutScreen(
     fun startIndex(force: Boolean) {
         if (indexRunning) return
         indexRunning = true
-        indexReport = null
+        indexSummary = null
         indexScope.launch {
             val outcome = withContext(Dispatchers.IO) {
                 indexer.build(force = force) { phase -> indexPhase.value = phase }
             }
             indexPhase.value = null
             indexRunning = false
-            indexReport = when (outcome) {
-                is ConversationIndexer.Outcome.Failed -> "❌ ${outcome.message}"
+            indexSummary = when (outcome) {
+                is ConversationIndexer.Outcome.Failed -> IndexSummary(
+                    headline = "建立索引失败",
+                    ok = false,
+                    detail = outcome.message,
+                    facts = emptyList(),
+                )
                 is ConversationIndexer.Outcome.Done -> {
                     val r = outcome.result
-                    val head = when {
+                    val (headline, detail) = when {
                         r.cached ->
-                            "✅ 已是最新：QQ 的两个库和图片缓存都没有变化，这次没有重扫。"
+                            "已是最新" to "QQ 的两个库和图片缓存都没有变化，这次没有重扫"
                         r.resumed ->
-                            "✅ 增量更新（只扫了新消息）："
+                            "增量更新" to "只扫了新消息，从上次读到的位置继续"
                         else ->
-                            "✅ 全量重建："
+                            "全量重建" to "从头重读了全部消息和图片"
                     }
                     val senders = withContext(Dispatchers.IO) { indexer.senderCount() }
-                    val stamp = if (r.at > 0) "。完成于 ${formatTimestamp(r.at)}" else ""
-                    head + sums(r, senders) + stamp
+                    summaryOf(
+                        r,
+                        senders,
+                        headline = headline,
+                        detail = if (r.at > 0) {
+                            "$detail · 完成于 ${formatTimestamp(r.at)}"
+                        } else {
+                            detail
+                        },
+                    )
                 }
             }
         }
@@ -482,115 +509,13 @@ fun AboutScreen(
 
             HorizontalDivider()
 
-            Text(
-                text = "消息数据库（调试）",
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.primary,
+            DatabaseSection(
+                indexPhase = phase,
+                indexRunning = indexRunning,
+                indexSummary = indexSummary,
+                indexElapsedMillis = indexTick - indexStartedAt,
+                onStartIndex = ::startIndex,
             )
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(MaterialTheme.colorScheme.surfaceContainer)
-                    .padding(horizontal = 16.dp, vertical = 14.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                Text(
-                    text = "只读探测 QQ 的聊天记录库 nt_msg.db：定位文件、离线推导密钥、" +
-                        "尝试解密第一页并列出全部表名。这是“按会话分类图库”的可行性验证，" +
-                        "全程只读，不复制、不改动 QQ 的任何数据。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Button(
-                    onClick = {
-                        probeRunning = true
-                        probeScope.launch {
-                            probeReport = runCatching { NtdbProbe.run() }.getOrElse { error ->
-                                "❌ 探针异常：${error.javaClass.simpleName}: ${error.message}"
-                            }
-                            probeRunning = false
-                        }
-                    },
-                    enabled = !probeRunning,
-                ) {
-                    Text(
-                        text = when {
-                            probeRunning -> "正在探测…"
-                            probeReport == null -> "开始探测"
-                            else -> "重新探测"
-                        },
-                    )
-                }
-                val report = probeReport
-                if (report != null) {
-                    SelectionContainer {
-                        Text(
-                            text = report,
-                            style = MaterialTheme.typography.bodySmall,
-                            fontFamily = FontFamily.Monospace,
-                        )
-                    }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        onClick = { startIndex(force = false) },
-                        enabled = !indexRunning,
-                    ) {
-                        Text(if (indexRunning) "正在建立…" else "建立会话索引")
-                    }
-                    if (!indexRunning) {
-                        TextButton(onClick = { startIndex(force = true) }) {
-                            Text("强制重建")
-                        }
-                    }
-                }
-                if (!indexRunning) {
-                    Text(
-                        text = "「建立会话索引」只在 QQ 的库或图片缓存变了时重扫，并从上次读到的" +
-                            "消息继续；「强制重建」清空水位线，两条消息表从第一条重新读一遍，" +
-                            "耗时最久，只在怀疑有漏时才用。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                phase?.let { current ->
-                    if (current != ConversationIndexer.Phase.Unchanged) {
-                        LinearProgressIndicator(
-                            progress = { phaseFraction(current) },
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                    ) {
-                        Text(
-                            text = phaseLabel(current),
-                            modifier = Modifier.weight(1f),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontFamily = FontFamily.Monospace,
-                        )
-                        if (indexRunning) {
-                            Text(
-                                text = "用时 ${formatDuration(indexTick - indexStartedAt)}",
-                                style = MaterialTheme.typography.bodySmall,
-                                fontFamily = FontFamily.Monospace,
-                            )
-                        }
-                    }
-                }
-                indexReport?.let { text ->
-                    SelectionContainer {
-                        Text(
-                            text = text,
-                            style = MaterialTheme.typography.bodySmall,
-                            fontFamily = FontFamily.Monospace,
-                        )
-                    }
-                }
-            }
 
             HorizontalDivider()
 
@@ -598,53 +523,3 @@ fun AboutScreen(
         }
     }
 }
-
-/** One line describing what the index build is doing, for the debug card. */
-private fun phaseLabel(phase: ConversationIndexer.Phase): String = when (phase) {
-    ConversationIndexer.Phase.Locating -> "正在定位消息数据库…"
-    ConversationIndexer.Phase.Unchanged -> "缓存仍然有效，没有重扫"
-    ConversationIndexer.Phase.Naming -> "正在读取会话名称…"
-    is ConversationIndexer.Phase.Hashing ->
-        if (phase.total == 0) {
-            "正在统计需要校验的图片…"
-        } else {
-            "正在校验图片 md5：${phase.done} / ${phase.total}"
-        }
-    is ConversationIndexer.Phase.ReadingTrees ->
-        if (phase.total > 0) {
-            "正在清点 ${phase.tree.id}：${phase.done} / ${phase.total}"
-        } else {
-            "正在清点 ${phase.tree.id}：${phase.done} 个"
-        }
-    is ConversationIndexer.Phase.ReadingMessages ->
-        "正在读取聊天记录：已扫 ${phase.scanned} 条，命中 ${phase.matched} 张"
-    is ConversationIndexer.Phase.ReadingFiles ->
-        "正在读取文件库：已扫 ${phase.scanned} 条，命中 ${phase.matched} 张"
-}
-
-/**
- * Where the whole build is, 0..1, from the numbers each phase reports.
- *
- * The weights follow how long the passes actually take: hashing ~100k files and
- * reading 2.4 million message rows are minutes each, the other three are seconds.
- */
-private fun phaseFraction(phase: ConversationIndexer.Phase): Float = (when (phase) {
-    ConversationIndexer.Phase.Locating -> 0.01f
-    is ConversationIndexer.Phase.Hashing ->
-        0.02f + 0.40f * if (phase.total > 0) phase.done.toFloat() / phase.total else 0f
-    is ConversationIndexer.Phase.ReadingTrees ->
-        0.42f + 0.06f * if (phase.total > 0) {
-            (phase.done.toFloat() / phase.total).coerceIn(0f, 1f)
-        } else {
-            0f
-        }
-    is ConversationIndexer.Phase.ReadingMessages -> 0.48f + 0.44f * phase.fraction
-    is ConversationIndexer.Phase.ReadingFiles ->
-        0.92f + 0.06f * if (phase.total > 0) {
-            (phase.scanned.toFloat() / phase.total).coerceIn(0f, 1f)
-        } else {
-            0f
-        }
-    ConversationIndexer.Phase.Naming -> 0.98f
-    ConversationIndexer.Phase.Unchanged -> 1f
-}).coerceIn(0f, 1f)

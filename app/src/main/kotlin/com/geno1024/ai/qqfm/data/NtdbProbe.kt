@@ -10,6 +10,7 @@ import android.annotation.SuppressLint
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.security.MessageDigest
+import java.util.Locale
 import javax.crypto.Cipher
 import javax.crypto.Mac
 import javax.crypto.SecretKeyFactory
@@ -60,21 +61,68 @@ import javax.crypto.spec.SecretKeySpec
  */
 object NtdbProbe {
 
+    /** One stage of the probe, as the debug card lists it. */
+    enum class Level { OK, WARN, FAIL }
+
+    data class Step(val label: String, val level: Level, val detail: String)
+
+    /** A value worth showing on its own line rather than inside the log. */
+    data class Fact(val label: String, val value: String)
+
+    /**
+     * What one probe found.
+     *
+     * [log] is the full transcript, kept verbatim for copying into a bug report;
+     * [steps] and [facts] are the same findings shaped for reading, so the card can
+     * show "what works / what broke" without asking anyone to parse crypto output.
+     */
+    data class Report(
+        val ok: Boolean,
+        val headline: String,
+        val steps: List<Step>,
+        val facts: List<Fact>,
+        val tables: List<String>,
+        val log: String,
+    )
+
     private fun q(value: String) = RootShell.shellQuote(value)
 
-    /** Runs the whole probe off the main thread; returns the report as text. */
-    suspend fun run(): String = withContext(Dispatchers.IO) {
+    /** A byte count in the unit a person would read it in, e.g. 17.2 GB. */
+    private fun humanBytes(bytes: Long): String {
+        val units = listOf("B", "KB", "MB", "GB", "TB")
+        var value = bytes.toDouble()
+        var unit = 0
+        while (value >= 1024 && unit < units.lastIndex) {
+            value /= 1024
+            unit++
+        }
+        return if (unit == 0) "$bytes B" else String.format(Locale.US, "%.1f %s", value, units[unit])
+    }
+
+    /** Runs the whole probe off the main thread; returns the shaped report. */
+    suspend fun run(): Report = withContext(Dispatchers.IO) {
         val out = StringBuilder()
         val startedAt = System.currentTimeMillis()
+        val steps = ArrayList<Step>()
+        val facts = ArrayList<Fact>()
+        val tableNames = ArrayList<String>()
         fun say(line: String = "") { out.append(line).append('\n') }
         fun stamp() = "${System.currentTimeMillis() - startedAt} ms"
+        fun step(label: String, level: Level, detail: String) {
+            steps += Step(label, level, detail)
+        }
+        fun fact(label: String, value: String) { facts += Fact(label, value) }
+        fun finish(ok: Boolean, headline: String): Report {
+            fact("耗时", stamp())
+            return Report(ok, headline, steps.toList(), facts.toList(), tableNames.toList(), out.toString())
+        }
 
         say("=== nt_msg.db 原地读取探针 ===")
-        say(
-            RootShell.exec("dumpsys package com.tencent.mobileqq | grep -m1 versionName 2>/dev/null")
-                .output.lineSequence().firstOrNull { "versionName" in it }?.trim()
-                ?.let { "QQ：$it" } ?: "QQ：版本未知",
-        )
+        val qqVersion = RootShell.exec(
+            "dumpsys package com.tencent.mobileqq | grep -m1 versionName 2>/dev/null",
+        ).output.lineSequence().firstOrNull { "versionName" in it }?.trim()
+        say(qqVersion?.let { "QQ：$it" } ?: "QQ：版本未知")
+        fact("QQ 版本", qqVersion?.substringAfterLast('=')?.trim().orEmpty().ifEmpty { "未知" })
 
         // The documented layout, hand-confirmed on this device — no scanning.
         // One run's su saw this exact path missing while a root shell did not,
@@ -85,7 +133,14 @@ object NtdbProbe {
         val uidDir = "$dataDir/files/uid"
         fun dbPathFor(ntUid: String): String =
             "$dbRoot/nt_qq_${md5(md5(ntUid) + "nt_kernel")}/nt_msg.db"
-        say("root：" + RootShell.exec("id").output.trim())
+        val rootId = RootShell.exec("id").output.trim()
+        say("root：$rootId")
+        val isRoot = rootId.contains("uid=0")
+        step(
+            "root 权限",
+            if (isRoot) Level.OK else Level.FAIL,
+            if (isRoot) "可用" else "不可用——读取 QQ 的私有目录需要 root",
+        )
 
         // ---- locate the message database (independent of uid) ----
         // Multiple accounts mean multiple nt_msg.db; the docs say to pick by file
@@ -96,6 +151,7 @@ object NtdbProbe {
         say("nt_msg.db：${present.joinToString(" ").ifEmpty { "无" }}")
         if (present.isEmpty()) {
             say("❌ 没有 nt_msg.db，停止。")
+            step("定位消息库", Level.FAIL, "没有找到 nt_msg.db")
             // Targeted facts, no scanning: with the namespace fixed these paths
             // resolve, so a remaining miss means the layout moved — show what
             // nt_db actually holds.
@@ -115,24 +171,33 @@ object NtdbProbe {
             diag("root", "readlink /proc/self/root")
             diag("mount /data/data", "grep ' /data/data ' /proc/self/mountinfo")
             diag("init ns 视角", "nsenter -t 1 -m -- ls -1 /data/user/0 | head -10")
-            return@withContext out.toString()
+            return@withContext finish(false, "没有找到 QQ 的消息库（nt_msg.db）")
         }
         val dbPath = present.first()
         if (present.size > 1) say("⚠️ 发现 ${present.size} 个 nt_msg.db，取第一个")
         say("db = $dbPath")
-        say(
-            RootShell.exec(
-                "stat -c '%n %s bytes' -- " +
-                    listOf(dbPath, "$dbPath-wal", "$dbPath-shm").joinToString(" ") { q(it) } +
-                    " 2>/dev/null",
-            ).output.trim(),
+        step(
+            "定位消息库",
+            if (present.size > 1) Level.WARN else Level.OK,
+            if (present.size > 1) "找到 ${present.size} 个，取了第一个" else "已找到",
         )
+        fact("消息库", dbPath)
+        val statLine = RootShell.exec(
+            "stat -c '%n %s bytes' -- " +
+                listOf(dbPath, "$dbPath-wal", "$dbPath-shm").joinToString(" ") { q(it) } +
+                " 2>/dev/null",
+        ).output.trim()
+        say(statLine)
+        statLine.lineSequence().firstOrNull { it.startsWith(dbPath) }
+            ?.split(' ')?.getOrNull(1)?.toLongOrNull()
+            ?.let { fact("数据库大小", humanBytes(it)) }
 
         // ---- the head: 1024-byte custom header + as many page-size candidates as fit ----
         val head = RootShell.readBytesAt(dbPath, 0L, HEAD_LIMIT)
         if (head == null || head.size < CUSTOM_HEADER + 64) {
             say("❌ 读取文件头失败（${head?.size ?: 0} 字节），停止。")
-            return@withContext out.toString()
+            step("读取文件头", Level.FAIL, "只读到 ${head?.size ?: 0} 字节")
+            return@withContext finish(false, "消息库的文件头读不出来")
         }
         say("读到文件头 ${head.size} 字节（${stamp()}）")
         say(
@@ -154,6 +219,13 @@ object NtdbProbe {
             candidate.length in 4..24 && HMAC_ALGOS.none { candidate.startsWith(it) }
         }.take(24)
         say("rand 候选 ${randCandidates.size}：${randCandidates.joinToString(" ").ifEmpty { "无" }}")
+        step(
+            "读取文件头",
+            if (randCandidates.isEmpty()) Level.WARN else Level.OK,
+            "读了 ${head.size} 字节 · " +
+                (if (marker >= 0) "找到库标记" else "没找到库标记") +
+                " · rand 候选 ${randCandidates.size} 个",
+        )
 
         // ---- locate nt_uid: three independent sources, each reported verbatim ----
         // The last run stopped at "未找到" with no clue why, so every source keeps
@@ -216,7 +288,16 @@ object NtdbProbe {
                 say("   rand 已解析：${randCandidates.firstOrNull() ?: "无"}——补上任一来源即可继续。")
             }
             if (randCandidates.isEmpty()) say("❌ 头里没有可用的 rand 候选，停止。")
-            return@withContext out.toString()
+            step(
+                "推导密钥",
+                Level.FAIL,
+                when {
+                    accounts.isEmpty() && randCandidates.isEmpty() -> "账号 uid 和文件头随机串都没取到"
+                    accounts.isEmpty() -> "没取到账号 uid（nt_uid）"
+                    else -> "文件头里没有可用的随机串"
+                },
+            )
+            return@withContext finish(false, "拿不到推导密钥所需的账号信息")
         }
 
         // The directory name is derived from the account, so a uid whose predicted
@@ -230,6 +311,19 @@ object NtdbProbe {
                 "nt_uid = ${acc.ntUid}（uin ${acc.uin.ifEmpty { "?" }}） " +
                     "md5=${md5(acc.ntUid)} ${if (acc.path in present) "→ ✓ 就是该 db" else ""}",
             )
+        }
+        step(
+            "识别账号",
+            if (matched != null) Level.OK else Level.WARN,
+            when {
+                matched != null -> "nt_uid = ${matched.ntUid}"
+                accounts.size > 1 -> "${accounts.size} 个候选 uid，都推不出这个库的路径"
+                else -> "推不出这个库的路径，按发现的文件继续"
+            },
+        )
+        if (matched != null) {
+            fact("nt_uid", matched.ntUid)
+            if (matched.uin.isNotEmpty()) fact("QQ 号", matched.uin)
         }
 
         // ---- derive and try: every assumption is a loop until the header agrees ----
@@ -309,12 +403,15 @@ object NtdbProbe {
                 }
             }
             say("结论：此 QQ 版本的密钥推导或头布局与已知不符，Phase 1 前需换取密钥方式。耗时 ${stamp()}")
-            return@withContext out.toString()
+            step("推导密钥", Level.FAIL, "试了 $tries 次，都对不上文件头")
+            return@withContext finish(false, "解不开消息库：密钥推导与这个 QQ 版本不符")
         }
         val (hit, page1) = found
         say("✅ 第 1 页解密成功（${stamp()}）：salt=${hit.saltTag} 形态=${hit.layout.tag} " +
             "rand=${hit.rand} page=${hit.pageSize} reserve=${hit.reserve} kdf=${hit.kdf}")
         say("key = ${hit.key}")
+        step("推导密钥", Level.OK, "rand=${hit.rand}")
+        fact("密钥来源", "${hit.saltTag} · ${hit.layout.tag}")
 
         // ---- what the plaintext header says ----
         val declared = u16(page1, 16).let { if (it == 1) 65536 else it }
@@ -332,6 +429,14 @@ object NtdbProbe {
             say("⚠️ 声明页大小 $declared 与解密假设 ${hit.pageSize} 不一致")
         }
         if (reserved != hit.reserve) say("⚠️ 头里 reserved=$reserved，与假设 ${hit.reserve} 不同")
+        step(
+            "解密第一页",
+            Level.OK,
+            "页 $declared · 保留区 $reserved · ${if (writeVersion == 2) "WAL" else "回滚日志"}",
+        )
+        fact("页大小", "$declared（保留 $reserved 字节）")
+        fact("日志模式", if (writeVersion == 2) "WAL" else "回滚日志")
+        fact("PBKDF2 轮数", hit.kdf.toString())
 
         // ---- walk sqlite_master off the decrypted pages ----
         val aes = derived.getValue("${hit.saltTag}@${hit.key}@${hit.kdf}")
@@ -377,12 +482,16 @@ object NtdbProbe {
         tables.forEach { (name, root) ->
             say("  $name  root=${if (root >= 0) root else "?"}")
         }
+        tableNames += tables.keys
+        fact("表数量", "${tables.size} 张")
         if (tables.isEmpty()) {
             say("❌ 第 1 页解开了，但没能解析出任何表——报告此结果以便修正解析。")
-        } else {
-            say("✅ 探针通过：密钥与原地解密路径可用，Phase 1（native 全量读取器）可开工。总耗时 ${stamp()}")
+            step("读取表结构", Level.FAIL, "解密成功，但一张表也没解析出来")
+            return@withContext finish(false, "解密成功，但表结构读不出来")
         }
-        out.toString()
+        say("✅ 探针通过：密钥与原地解密路径可用，Phase 1（native 全量读取器）可开工。总耗时 ${stamp()}")
+        step("读取表结构", Level.OK, "${tables.size} 张表 · 读了 $pagesRead 页")
+        finish(true, "通过：消息库可以只读解密，会话索引可用")
     }
 
     // ---- locating ----
