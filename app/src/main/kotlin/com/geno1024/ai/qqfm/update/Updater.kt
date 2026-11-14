@@ -56,9 +56,12 @@ object Updater {
     }
 
     fun parseVersion(text: String): Version? {
-        // Any 0.x base: a build from before a base bump has to keep being able to read
-        // the releases that come after it, otherwise the update check goes dark.
-        val match = Regex("""(0\.\d+)\.(\d+)\.(\d+)\.([0-9a-fA-F]{8})""").find(text) ?: return null
+        // Any `<major>.<minor>` base, not just 0.x: an installed build has to keep
+        // reading the releases that come after it, and a future 1.0 would otherwise
+        // go dark for every 0.2 device — the same trap the 0.1 parser fell into.
+        // The stamp's shape is what the parser keys on, so changing *that* (dropping
+        // a field, swapping the order) still needs an old-shape shim.
+        val match = Regex("""(\d+\.\d+)\.(\d+)\.(\d+)\.([0-9a-fA-F]{8})""").find(text) ?: return null
         return Version(
             base = match.groupValues[1],
             env = match.groupValues[2].toInt(),
