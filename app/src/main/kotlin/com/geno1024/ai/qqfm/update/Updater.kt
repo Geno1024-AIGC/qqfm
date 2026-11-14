@@ -31,31 +31,39 @@ object Updater {
     fun sourceFrom(id: String?): Source = SOURCES.firstOrNull { it.id == id } ?: SOURCES.first()
 
     /**
-     * A build stamp: `0.1.<env>.<pack>.<sha>`.
+     * A build stamp: `<major>.<minor>.<env>.<pack>.<sha>`, e.g. `0.2.407.151.733e3679`.
      *
-     * [env] is the commit count and [pack] the number of packaging runs. Ordering uses
-     * [env] alone: both numbers are restarted by different events, but the commit count
-     * only grows, while `pack` grows on every local rebuild of the same commit — letting
-     * it vote would make a local build always look newer than the CI build of the same
-     * commit. [sha] identifies the commit and is a name, not a number.
+     * [base] is the functional version — it moves when the app's capabilities do, not
+     * on a schedule — and is carried as text so an old stamp still parses. [env] is the
+     * commit count and [pack] the number of packaging runs. Ordering uses [env] alone:
+     * it is the one number that only grows, across base bumps included; `pack` grows on
+     * every local rebuild of the same commit, and letting it vote would make a local
+     * build always look newer than the CI build of the same commit. [sha] identifies
+     * the commit and is a name, not a number.
      */
-    class Version(val env: Int, val pack: Int, val sha: String) : Comparable<Version> {
+    class Version(val base: String, val env: Int, val pack: Int, val sha: String) :
+        Comparable<Version> {
+
         override fun compareTo(other: Version): Int = env.compareTo(other.env)
 
         override fun equals(other: Any?): Boolean =
-            other is Version && env == other.env && pack == other.pack && sha == other.sha
+            other is Version && base == other.base && env == other.env &&
+                pack == other.pack && sha == other.sha
 
-        override fun hashCode(): Int = (env * 31 + pack) * 31 + sha.hashCode()
+        override fun hashCode(): Int = ((base.hashCode() * 31 + env) * 31 + pack) * 31 + sha.hashCode()
 
-        override fun toString(): String = "0.1.$env.$pack.$sha"
+        override fun toString(): String = "$base.$env.$pack.$sha"
     }
 
     fun parseVersion(text: String): Version? {
-        val match = Regex("""0\.1\.(\d+)\.(\d+)\.([0-9a-fA-F]{8})""").find(text) ?: return null
+        // Any 0.x base: a build from before a base bump has to keep being able to read
+        // the releases that come after it, otherwise the update check goes dark.
+        val match = Regex("""(0\.\d+)\.(\d+)\.(\d+)\.([0-9a-fA-F]{8})""").find(text) ?: return null
         return Version(
-            env = match.groupValues[1].toInt(),
-            pack = match.groupValues[2].toInt(),
-            sha = match.groupValues[3].lowercase(),
+            base = match.groupValues[1],
+            env = match.groupValues[2].toInt(),
+            pack = match.groupValues[3].toInt(),
+            sha = match.groupValues[4].lowercase(),
         )
     }
 

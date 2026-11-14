@@ -4,8 +4,9 @@ import org.gradle.api.Project
 import java.io.File
 
 /**
- * A build stamp of the form `0.1.<env>.<pack>.<sha1>`.
+ * A build stamp of the form `<base>.<env>.<pack>.<sha1>`, currently `0.2.…`.
  *
+ * [base] is the functional version and only moves when the app's capabilities do;
  * [env] is the commit count, [pack] the number of packaging runs and [sha1] the short
  * commit id. Only [env] is ordered — see [Versioning.env].
  */
@@ -20,7 +21,7 @@ data class Stamp(
     val versionCode: Int get() = (env.toIntOrNull() ?: 0).coerceAtLeast(1)
 
     companion object {
-        const val BASE_VERSION = "0.1"
+        const val BASE_VERSION = "0.2"
     }
 }
 

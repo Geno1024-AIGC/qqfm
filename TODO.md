@@ -556,3 +556,16 @@ chatthumb N 张（对上 M）、shortvideo 视频 N 个（对上 M）、缩略�
 - 版本没变：新增的 `result.links.<tree>` 只是多存几个数，旧结果照样能用，
   只是 `chatimg`/`chatthumb` 那两行暂时只显示张数、不显示「对上」。
 
+## 版本号提到 0.2（2026-11-14 做）
+
+`0.1` 起步时只是一个本地图库；现在能看 `chatraw`/`chatimg`/`chatthumb`/`shortvideo`/
+视频缩略图五棵树、按识别文字搜图、按会话归类（图片和视频）、显示发送者、只读探测消息库、
+自更新 —— 功能上够一个次版本号，所以 `BASE_VERSION` 从 `0.1` 改成 `0.2`，包名变成
+`0.2.<commit>.<pack>.<sha>`。`versionCode` 仍是 commit 数，升级顺序不变。
+
+`Updater` 原来把 `0.1.` 写死在正则和 `toString()` 里，换 base 会让「当前版本」解析失败、
+自更新直接变哑；现在按 `0.<minor>.<env>.<pack>.<sha>` 解析，排序仍只看 `env`
+（commit 数，跨 base 也单调），`equals` 才比较 base。
+
+**注意**：已经装在手机上的 0.1 包只认 `0.1.` 开头的 tag，解析不出 0.2 的发布，
+所以这一次要手动下载安装；装上 0.2 的包之后自更新恢复（它两种都认）。
