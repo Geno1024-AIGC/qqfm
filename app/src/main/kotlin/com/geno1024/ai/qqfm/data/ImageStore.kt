@@ -182,18 +182,38 @@ class ImageStore(private val context: Context) {
         }
     }
 
-    /** Drops old copies once [dir] grows past [VIDEO_CACHE_BYTES]. */
+    /**
+     * Drops old copies once [dir] grows past [VIDEO_CACHE_BYTES].
+     *
+     * Sizes and mtimes are read once into a snapshot before anything is sorted:
+     * copies run in parallel (one lock per item), so a file being written next door
+     * changes its own `lastModified()` between two comparisons. A comparator whose
+     * answer depends on live filesystem state is inconsistent, and TimSort turns
+     * that into `IllegalArgumentException: Comparison method violates its general
+     * contract!` — which is how this crashed once. A snapshot also keeps the byte
+     * total and the deletion order agreeing with each other.
+     */
     private fun pruneVideoCache(dir: File, keep: File) {
-        val files = dir.listFiles() ?: return
-        var total = files.sumOf { it.length() }
-        if (total <= VIDEO_CACHE_BYTES) return
-        for (file in files.sortedBy { it.lastModified() }) {
-            if (total <= VIDEO_CACHE_BYTES) break
-            if (file == keep) continue
-            total -= file.length()
-            runCatching { file.delete() }
+        synchronized(pruneLock) {
+            val entries = dir.listFiles()?.map { file ->
+                VideoCopy(file, file.length(), file.lastModified())
+            } ?: return
+            var total = entries.sumOf { it.size }
+            if (total <= VIDEO_CACHE_BYTES) return
+            for (entry in entries.sortedBy { it.mtime }) {
+                if (total <= VIDEO_CACHE_BYTES) break
+                if (entry.file == keep) continue
+                total -= entry.size
+                runCatching { entry.file.delete() }
+            }
         }
     }
+
+    /** Serializes trimming, so two copies cannot prune against the same byte total. */
+    private val pruneLock = Any()
+
+    /** A copy in the video cache, measured once so a sort cannot see it change. */
+    private class VideoCopy(val file: File, val size: Long, val mtime: Long)
 
     /**
      * Decodes an image for the viewer, keeping motion when there is any.
