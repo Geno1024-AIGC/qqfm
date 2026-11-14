@@ -39,8 +39,6 @@ class ConversationIndex(context: Context) {
     data class Filed(
         val fromPath: Int,
         val fromMd5: Int,
-        /** Videos filed because QQ names them after the message's md5. */
-        val fromVideo: Int,
         /** Rows each message table held, so the next build's bar knows their weight. */
         val rowsByTable: Map<String, Long>,
         /**
@@ -165,7 +163,6 @@ class ConversationIndex(context: Context) {
 
         var fromPath = 0
         var fromMd5 = 0
-        var fromVideo = 0
         val rowsByTable = HashMap<String, Long>()
         val watermark = HashMap<String, Long>(4)
 
@@ -233,7 +230,7 @@ class ConversationIndex(context: Context) {
                     if (row.elem == 5) {
                         val key = row.md5.lowercase()
                         if (key in localBases) {
-                            if (name(key, row.peer, row.msgid, row.sender)) fromVideo++
+                            name(key, row.peer, row.msgid, row.sender)
                             matched++
                         }
                     }
@@ -251,7 +248,7 @@ class ConversationIndex(context: Context) {
             replaceNamed.close()
         }
         onProgress(scanned, matched, "", 0L)
-        return Filed(fromPath, fromMd5, fromVideo, rowsByTable, watermark)
+        return Filed(fromPath, fromMd5, rowsByTable, watermark)
     }
 
     /** One row of `files_in_chat_table`'s picture records. */

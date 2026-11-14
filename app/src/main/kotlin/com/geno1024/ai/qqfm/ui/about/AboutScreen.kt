@@ -142,16 +142,27 @@ fun AboutScreen(
     val indexScope = rememberCoroutineScope()
 
     /** The numbers a result carries, worded so a run and a stored result read alike. */
-    fun sums(r: ConversationIndexer.Result, senders: Int): String =
-        "chatraw ${formatGrouped(r.files.toLong())} 张、算出 md5 ${formatGrouped(r.hashed.toLong())} 张，" +
-            "对上会话 ${formatGrouped(r.indexed.toLong())} 张（文件库补充 " +
+    fun sums(r: ConversationIndexer.Result, senders: Int): String {
+        // A result built by the release that added video links but not their counts
+        // reports none of them; saying "0 个" there would be a wrong number, not a
+        // missing one.
+        val videos = if (r.videos > 0 || r.videoThumbs > 0) {
+            "，shortvideo 视频 ${formatGrouped(r.videos.toLong())} 个（对上 " +
+                "${formatGrouped(r.videoLinks.toLong())}）、缩略图 " +
+                "${formatGrouped(r.videoThumbs.toLong())} 个（对上 " +
+                "${formatGrouped(r.videoThumbLinks.toLong())}）"
+        } else {
+            ""
+        }
+        return "chatraw ${formatGrouped(r.files.toLong())} 张、算出 md5 " +
+            "${formatGrouped(r.hashed.toLong())} 张，对上会话 " +
+            "${formatGrouped(r.indexed.toLong())} 张（文件库补充 " +
             "${formatGrouped(r.fromFiles.toLong())} 张、图片/缩略图按文件名 " +
             "${formatGrouped(r.fromNames.toLong())} 条、消息自带路径 " +
-            "${formatGrouped(r.named.toLong())} 条），shortvideo " +
-            "${formatGrouped(r.videos.toLong())} 个视频里按 md5 对上 " +
-            "${formatGrouped(r.videoLinks.toLong())} 个，分布在 " +
+            "${formatGrouped(r.named.toLong())} 条）$videos，分布在 " +
             "${formatGrouped(r.conversations.toLong())} 个会话，其中 " +
             "${formatGrouped(senders.toLong())} 张知道发送者"
+    }
 
     // The build stores its numbers in the index itself, so opening the page shows the
     // standing result instead of an empty card that only fills in after a run.

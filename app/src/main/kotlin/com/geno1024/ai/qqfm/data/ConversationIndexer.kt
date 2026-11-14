@@ -90,6 +90,10 @@ class ConversationIndexer(
         val videos: Int = 0,
         /** Videos filed under the md5 their message carries. */
         val videoLinks: Int = 0,
+        /** Thumbnails in `shortvideo/thumbs`. */
+        val videoThumbs: Int = 0,
+        /** Thumbnails filed under the md5 their message carries. */
+        val videoThumbLinks: Int = 0,
         /** When this build finished, Unix millis; 0 for a result built before it was stored. */
         val at: Long = 0L,
         /** True when the build was skipped because the token still matched. */
@@ -166,7 +170,8 @@ class ConversationIndexer(
         val localBases = HashSet<String>(450_000)
         items.mapTo(localBases) { it.base }
         val treeSizes = HashMap<String, Int>(8)
-        var videos = 0
+        var videoItems: List<MediaItem> = emptyList()
+        var videoThumbItems: List<MediaItem> = emptyList()
         nameTrees.forEach { source ->
             val prior = previous["tree.${source.id}"]?.toIntOrNull() ?: 0
             val tree = repository.loadCached(source) ?: repository.scan(source) { done ->
@@ -176,7 +181,11 @@ class ConversationIndexer(
             // shared by the video and its thumbnail.
             tree.mapTo(localBases) { source.indexKey(it.base) }
             treeSizes[source.id] = tree.size
-            if (source == MediaSource.VIDEO) videos = tree.size
+            when (source) {
+                MediaSource.VIDEO -> videoItems = tree
+                MediaSource.VIDEO_THUMB -> videoThumbItems = tree
+                else -> Unit
+            }
         }
 
         val bounds = NtdbTool.messageBounds(context, target)
@@ -240,6 +249,15 @@ class ConversationIndexer(
         // gallery shows them side by side ("from <group> · <nickname>").
         conversations.namePeers(target, context, peers.map { it.first } + conversations.senders())
 
+        // A video and its thumbnail share one md5 key, so the video links are counted
+        // per file here rather than per key. Thumbnails outnumber the videos ten to
+        // one on a real cache — most videos were evicted while their frame stayed —
+        // so the two are reported apart. Reading the names again is one query, and it
+        // also counts rows an earlier resumed run filed.
+        val namedKeys = conversations.allNamed().keys
+        val videoLinks = videoItems.count { it.source.indexKey(it.base) in namedKeys }
+        val videoThumbLinks = videoThumbItems.count { it.source.indexKey(it.base) in namedKeys }
+
         val result = Result(
             files = items.size,
             hashed = needed.size,
@@ -250,8 +268,10 @@ class ConversationIndexer(
             fromNames = filed.fromMd5 + (if (resume.isEmpty()) 0 else prior("result.fromNames").toInt()),
             fromFiles = conversations.fileOnlyCount(),
             conversations = peers.size,
-            videos = videos,
-            videoLinks = filed.fromVideo + (if (resume.isEmpty()) 0 else prior("result.videoLinks").toInt()),
+            videos = videoItems.size,
+            videoLinks = videoLinks,
+            videoThumbs = videoThumbItems.size,
+            videoThumbLinks = videoThumbLinks,
             at = System.currentTimeMillis(),
             resumed = resume.isNotEmpty(),
         )
@@ -270,6 +290,8 @@ class ConversationIndexer(
                 put("result.conversations", result.conversations.toString())
                 put("result.videos", result.videos.toString())
                 put("result.videoLinks", result.videoLinks.toString())
+                put("result.videoThumbs", result.videoThumbs.toString())
+                put("result.videoThumbLinks", result.videoThumbLinks.toString())
                 put("build.time", result.at.toString())
                 put("scan.files", filesScanned.toString())
                 // Row counts accumulate for the same reason, and only ever grow: they
@@ -361,6 +383,11 @@ class ConversationIndexer(
         // there is anything to reuse.
         val indexed = meta["result.indexed"]?.toIntOrNull() ?: return null
         if (indexed <= 0) return null
+        // The video counts arrived one release after the video links did, so a result
+        // stored before them is still a valid index; its video numbers are dropped
+        // (recomputing them would mean another full pass) and the page leaves them out.
+        val videoThumbs = meta["result.videoThumbs"]?.toIntOrNull()
+        val videoCounts = videoThumbs != null
         return Result(
             files = meta["result.files"]?.toIntOrNull() ?: 0,
             hashed = meta["result.hashed"]?.toIntOrNull() ?: 0,
@@ -369,8 +396,14 @@ class ConversationIndexer(
             fromNames = meta["result.fromNames"]?.toIntOrNull() ?: 0,
             fromFiles = meta["result.fromFiles"]?.toIntOrNull() ?: 0,
             conversations = meta["result.conversations"]?.toIntOrNull() ?: 0,
-            videos = meta["result.videos"]?.toIntOrNull() ?: 0,
-            videoLinks = meta["result.videoLinks"]?.toIntOrNull() ?: 0,
+            videos = if (videoCounts) meta["result.videos"]?.toIntOrNull() ?: 0 else 0,
+            videoLinks = if (videoCounts) meta["result.videoLinks"]?.toIntOrNull() ?: 0 else 0,
+            videoThumbs = videoThumbs ?: 0,
+            videoThumbLinks = if (videoCounts) {
+                meta["result.videoThumbLinks"]?.toIntOrNull() ?: 0
+            } else {
+                0
+            },
             at = meta["build.time"]?.toLongOrNull() ?: 0L,
         )
     }
