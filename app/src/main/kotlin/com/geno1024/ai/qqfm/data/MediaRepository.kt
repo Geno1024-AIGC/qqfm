@@ -73,6 +73,114 @@ class MediaRepository(
     }
 
     /**
+     * Streams [source]'s cached listing, one entry at a time, without keeping them.
+     *
+     * Same filtering as [loadCached]: removed ids are skipped and null means "no
+     * usable listing". A caller that wants only a file's key can therefore walk a
+     * 150k-line listing without ever holding 150k items: on a phone with a 256 MB
+     * heap, two such lists next to `chatraw`'s were enough to run the conversation
+     * index out of memory.
+     */
+    fun streamCached(source: MediaSource, action: (MediaItem) -> Unit): Int? {
+        if (!keepIndex()) return null
+        val file = cacheFile(source)
+        if (!file.exists() || file.length() == 0L) return null
+        return runCatching {
+            val deleted = deletedIds(source)
+            var count = 0
+            file.forEachLine { line ->
+                val parts = line.split('\t')
+                if (parts.size != 4 && parts.size != 5) return@forEachLine
+                val path = parts[0]
+                val base = parts[1]
+                val size = parts[2].toLongOrNull() ?: return@forEachLine
+                val mtime = parts[3].toLongOrNull() ?: return@forEachLine
+                if (deleted.isNotEmpty() && "${source.id}/$base" in deleted) return@forEachLine
+                action(
+                    MediaItem(
+                        source, path, base, path.substringAfterLast('/'), size, mtime,
+                        parts.getOrNull(4)?.takeIf { it.isNotEmpty() },
+                    ),
+                )
+                count++
+            }
+            count
+        }.getOrNull()?.takeIf { it > 0 }
+    }
+
+    /**
+     * Walks [source], hands each entry to [action] and rewrites its listing on the
+     * way, keeping no entries.
+     *
+     * The same walk as [scan], for callers that only need each file's key. The two
+     * video trees still go through [scan]: a video's preview path is paired there,
+     * and the two thumbnail directory names are deduped there.
+     */
+    fun streamScan(
+        source: MediaSource,
+        onProgress: (Int) -> Unit = {},
+        action: (MediaItem) -> Unit,
+    ): Int {
+        require(source != MediaSource.VIDEO && source != MediaSource.VIDEO_THUMB) {
+            "video trees need the pairing and dedupe in scan()"
+        }
+        val keep = keepIndex()
+        val tmp = File(context.cacheDir, "scan-${source.id}.tsv.tmp")
+        val roots = source.scanDirs.joinToString(" ") { RootShell.shellQuote(it) }
+        val command = "find $roots -type f -print0 2>/dev/null" +
+            " | xargs -0 -r stat -c '%n\t%s\t%Y' 2>/dev/null"
+        val writer = if (keep) tmp.bufferedWriter() else null
+        var count = 0
+        var lastReport = 0L
+        var finished = false
+        try {
+            RootShell.forEachLine(command) { line ->
+                val firstTab = line.indexOf('\t')
+                val lastTab = line.lastIndexOf('\t')
+                if (firstTab <= 0 || lastTab <= firstTab) return@forEachLine
+                val path = line.substring(0, firstTab)
+                val size = line.substring(firstTab + 1, lastTab).toLongOrNull()
+                    ?: return@forEachLine
+                // stat reports seconds; the rest of the app thinks in milliseconds.
+                val mtime = (line.substring(lastTab + 1).toLongOrNull()
+                    ?: return@forEachLine) * 1000L
+                val name = path.substringAfterLast('/')
+                if (!source.accepts(name)) return@forEachLine
+                val item = MediaItem(source, path, source.baseOf(name), name, size, mtime)
+                action(item)
+                writer?.run {
+                    append(path).append('\t')
+                    append(item.base).append('\t')
+                    append(size.toString()).append('\t')
+                    append(mtime.toString()).append('\n')
+                }
+                count++
+                val now = System.currentTimeMillis()
+                if (now - lastReport > 250) {
+                    lastReport = now
+                    onProgress(count)
+                }
+            }
+            runCatching { writer?.close() }
+            if (keep) {
+                if (tmp.renameTo(cacheFile(source))) {
+                    // A fresh scan is the whole truth, so the removals it covers are done with.
+                    runCatching { removedFile(source).delete() }
+                } else {
+                    runCatching { tmp.delete() }
+                }
+            }
+            finished = true
+        } finally {
+            if (!finished) {
+                runCatching { writer?.close() }
+                runCatching { tmp.delete() }
+            }
+        }
+        return count
+    }
+
+    /**
      * Counts cached entries of [source] whose index key is in [keys], streaming the
      * listing instead of building items.
      *

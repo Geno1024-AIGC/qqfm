@@ -154,41 +154,48 @@ class ConversationIndexer(
         /** A number the last build stored, or 0 when this is the first one. */
         fun prior(key: String): Long = previous[key]?.toLongOrNull() ?: 0L
 
-        val items = repository.loadCached(MediaSource.RAW)
-            ?: repository.scan(MediaSource.RAW).items
-        if (items.isEmpty()) return Outcome.Failed("chatraw 里没有图片")
-
-        val cache = hashes.load(MediaSource.RAW)
-        onPhase(Phase.Hashing(0, 0))
-        hashes.refresh(MediaSource.RAW, items, cache) { done, total ->
-            onPhase(Phase.Hashing(done, total))
-        }
-        hashes.save(MediaSource.RAW, cache)
-
-        val needed = items.mapNotNullTo(HashSet()) { item -> cache[item.base]?.md5 }
+        val localBases = HashSet<String>(450_000)
+        // The `chatraw` listing is ~100k items with a full path each. It is dropped
+        // as soon as the hashes are saved; the picture trees below need that room.
+        val raw = readRaw(localBases, onPhase)
+            ?: return Outcome.Failed("chatraw 里没有图片")
+        val needed = raw.md5s
         if (needed.isEmpty()) return Outcome.Failed("还没有任何图片的 md5 可对上消息")
-
         // Every name the name routes can file: the picture trees, whose names are
         // derived from the md5 ([CacheName]), and the two video trees, whose names
         // *are* the md5. A video the gallery cannot show is a link not worth storing.
-        val localBases = HashSet<String>(450_000)
-        items.mapTo(localBases) { it.base }
         val treeSizes = HashMap<String, Int>(8)
         var videoItems: List<MediaItem> = emptyList()
         var videoThumbItems: List<MediaItem> = emptyList()
         nameTrees.forEach { source ->
             val prior = previous["tree.${source.id}"]?.toIntOrNull() ?: 0
-            val tree = repository.loadCached(source) ?: repository.scan(source) { done ->
-                onPhase(Phase.ReadingTrees(source, done, prior))
-            }.items
-            // For a picture tree this is the cache name; for a video it is the md5
-            // shared by the video and its thumbnail.
-            tree.mapTo(localBases) { source.indexKey(it.base) }
-            treeSizes[source.id] = tree.size
             when (source) {
-                MediaSource.VIDEO -> videoItems = tree
-                MediaSource.VIDEO_THUMB -> videoThumbItems = tree
-                else -> Unit
+                // A video and its thumbnail are a few thousand files, and the gallery
+                // needs the items themselves (the scan pairs them), so they keep their
+                // lists. The picture trees are two ~150k-file trees of which only the
+                // names are wanted, so they are streamed instead of materialized.
+                MediaSource.VIDEO, MediaSource.VIDEO_THUMB -> {
+                    val tree = repository.loadCached(source) ?: repository.scan(source) { done ->
+                        onPhase(Phase.ReadingTrees(source, done, prior))
+                    }.items
+                    tree.mapTo(localBases) { source.indexKey(it.base) }
+                    treeSizes[source.id] = tree.size
+                    if (source == MediaSource.VIDEO) {
+                        videoItems = tree
+                    } else {
+                        videoThumbItems = tree
+                    }
+                }
+                else -> {
+                    val count = repository.streamCached(source) { item ->
+                        localBases.add(source.indexKey(item.base))
+                    } ?: repository.streamScan(source, { done ->
+                        onPhase(Phase.ReadingTrees(source, done, prior))
+                    }) { item ->
+                        localBases.add(source.indexKey(item.base))
+                    }
+                    treeSizes[source.id] = count
+                }
             }
         }
 
@@ -272,7 +279,7 @@ class ConversationIndexer(
         }.toMap()
 
         val result = Result(
-            files = items.size,
+            files = raw.files,
             hashed = needed.size,
             indexed = peers.sumOf { it.second },
             // `named` only knows the names this run discovered; the rows filed by
@@ -324,6 +331,39 @@ class ConversationIndexer(
             },
         )
         return Outcome.Done(result)
+    }
+
+    /** What one `chatraw` pass leaves behind once its listing is dropped. */
+    private class RawPass(val files: Int, val md5s: Set<String>)
+
+    /**
+     * Hashes `chatraw` and returns what the rest of the build needs, letting the
+     * listing go as soon as its md5s are saved.
+     *
+     * The listing is ~100k items, each carrying a full path; keeping it alive while
+     * the two ~150k-file picture trees are read is a third of the build's memory for
+     * nothing. [localBases] already takes the one field worth keeping.
+     *
+     * Null means the tree held no pictures at all.
+     */
+    private fun readRaw(
+        localBases: MutableSet<String>,
+        onPhase: (Phase) -> Unit,
+    ): RawPass? {
+        val items = repository.loadCached(MediaSource.RAW)
+            ?: repository.scan(MediaSource.RAW).items
+        if (items.isEmpty()) return null
+
+        val cache = hashes.load(MediaSource.RAW)
+        onPhase(Phase.Hashing(0, 0))
+        hashes.refresh(MediaSource.RAW, items, cache) { done, total ->
+            onPhase(Phase.Hashing(done, total))
+        }
+        hashes.save(MediaSource.RAW, cache)
+
+        val md5s = items.mapNotNullTo(HashSet()) { item -> cache[item.base]?.md5 }
+        items.mapTo(localBases) { it.base }
+        return RawPass(items.size, md5s)
     }
 
     /**

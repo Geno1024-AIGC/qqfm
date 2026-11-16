@@ -588,3 +588,27 @@ tag」的坑。真正的约束只剩一条：**版本号五段的形状不要改
 避免两个并发的拷贝各按自己的总字节数删一遍。
 
 这不会影响只读铁律：清理的只是应用自己 `cacheDir/videos` 里的副本。
+
+## 建立索引时在 chatimg 上 OOM（2026-11-16 修）
+
+崩溃报告（0.2.129.153）：`OutOfMemoryError: Failed to allocate a 152 byte allocation
+… target footprint 268435456, growth limit 268435456` ← `RootShell.oneShotStream`
+的 `readLine` ← `MediaRepository.scan` ← `ConversationIndexer.build`。不是某一行太大，
+而是**读下一行时堆已经满了**：建索引时同时驻留着 `chatraw` 的 10 万条 `MediaItem`、
+`chatimg` 15.8 万条、`chatthumb` 14.5 万条三份列表（每条都带完整路径、名字、base），
+再加 44 万条 `localBases` 和 10 万条 md5 缓存 —— 256 MB 的堆撑不住。
+
+修法（索引语义不变，`INDEX_VERSION` 不动）：
+
+- `MediaRepository.streamScan()`：和 `scan()` 一样 `find | xargs stat`，但每读一行
+  就交给回调、并直接写缓存清单，**不建列表**；中途失败会删掉半截临时文件；
+- `MediaRepository.streamCached()`：已有清单也流式读，删除记录（`.removed`）照样过滤；
+- `ConversationIndexer` 里 `chatimg`/`chatthumb` 改用这两个接口，只把
+  `indexKey(base)` 放进 `localBases`；视频两棵树仍走 `loadCached`/`scan`（只有几千条，
+  而且要把视频和缩略图配对）；
+- `chatraw` 那一步抽成 `readRaw()`：算完 md5 就把那份列表和哈希缓存放掉，只留下
+  `needed`（md5 集合）和 `localBases`。
+
+峰值从「三份列表 + 两个大集合」降到「一份 10 万条列表（短暂）+ 两个集合」，
+`chatimg`/`chatthumb` 阶段几乎只占一行字符串的内存。清单仍在 `cacheDir`，系统清缓存后
+会重扫一遍 —— 那只是 `find | stat`，不再吃大内存。
