@@ -48,6 +48,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -244,7 +245,12 @@ private fun GalleryTopBar(
                     IconButton(onClick = { onSearchingChange(true) }) {
                         Icon(Icons.Filled.Search, contentDescription = "搜索文字")
                     }
-                    SortMenu(state.sortMode, viewModel::setSortMode)
+                    SortMenu(
+                        current = state.sortMode,
+                        order = state.conversationOrder,
+                        onSelect = viewModel::setSortMode,
+                        onOrderSelect = viewModel::setConversationOrder,
+                    )
                     IconButton(onClick = viewModel::refresh, enabled = !state.scanning) {
                         Icon(Icons.Filled.Refresh, contentDescription = "重新扫描")
                     }
@@ -312,7 +318,12 @@ private fun SearchFilters(query: String, onQuery: (String) -> Unit) {
 }
 
 @Composable
-private fun SortMenu(current: SortMode, onSelect: (SortMode) -> Unit) {
+private fun SortMenu(
+    current: SortMode,
+    order: ConversationOrder,
+    onSelect: (SortMode) -> Unit,
+    onOrderSelect: (ConversationOrder) -> Unit,
+) {
     var expanded by remember { mutableStateOf(false) }
     Box {
         IconButton(onClick = { expanded = true }) {
@@ -332,6 +343,32 @@ private fun SortMenu(current: SortMode, onSelect: (SortMode) -> Unit) {
                         }
                     },
                 )
+            }
+            // The inner order only means something while grouping by conversation, so
+            // it appears under that choice instead of as four more top-level modes
+            // that would do nothing in the other sorts.
+            if (current == SortMode.CONVERSATION) {
+                HorizontalDivider()
+                Text(
+                    text = "会话内排序",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                )
+                ConversationOrder.entries.forEach { choice ->
+                    DropdownMenuItem(
+                        text = { Text(conversationOrderLabel(choice)) },
+                        onClick = {
+                            expanded = false
+                            onOrderSelect(choice)
+                        },
+                        trailingIcon = {
+                            if (choice == order) {
+                                Icon(Icons.Filled.Check, contentDescription = null)
+                            }
+                        },
+                    )
+                }
             }
         }
     }

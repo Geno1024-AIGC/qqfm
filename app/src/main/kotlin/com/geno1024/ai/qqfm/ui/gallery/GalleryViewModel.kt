@@ -54,6 +54,22 @@ enum class SortMode {
 }
 
 /**
+ * What comes first inside one conversation when the gallery is grouped by
+ * conversation.
+ *
+ * The grouping only decides which pictures sit together; this decides the order
+ * under each header. Newest first reads the way the chat did; biggest first is
+ * the one to use when the point is to find something to delete. A group's own
+ * position is still by picture count — this only reorders within a group.
+ */
+enum class ConversationOrder {
+    TIME_DESC,
+    TIME_ASC,
+    SIZE_DESC,
+    SIZE_ASC,
+}
+
+/**
  * A single slot of the gallery grid. Grouped sorts insert [GalleryRow.Header]
  * entries; [GalleryRow.Item] carries the index of the entry in [GalleryUiState.items]
  * so drag selection keeps working unchanged over grouped lists.
@@ -80,6 +96,8 @@ data class GalleryUiState(
     val conversationOf: Map<String, String> = emptyMap(),
     val totalBytes: Long = 0L,
     val sortMode: SortMode = SortMode.TIME_DESC,
+    /** Only used by [SortMode.CONVERSATION]; kept when another mode is selected. */
+    val conversationOrder: ConversationOrder = ConversationOrder.TIME_DESC,
     val collapsed: Set<String> = emptySet(),
     val displayRows: List<GalleryRow> = emptyList(),
     val frozen: Set<String> = emptySet(),
@@ -283,7 +301,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             val snapshot = _state.value
             val published = withContext(Dispatchers.Default) {
                 val visible = searchFiltered(visibleItemsOf(rawItems), snapshot)
-                val sorted = sort(visible, snapshot.sortMode)
+                val sorted = sort(visible, snapshot.sortMode, snapshot.conversationOrder)
                 Published(
                     items = sorted,
                     displayRows = buildRows(sorted, snapshot.sortMode, snapshot.collapsed),
@@ -414,7 +432,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         _state.update { state ->
             val selection = state.selection intersect visible.mapTo(HashSet()) { entry -> entry.id }
             state.copy(
-                items = sort(visible, state.sortMode),
+                items = sort(visible, state.sortMode, state.conversationOrder),
                 totalBytes = visible.sumOf { item -> item.size },
                 selection = selection,
                 selectionBytes = bytesOf(selection),
@@ -483,7 +501,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         byId = items.associateBy { it.id }
         _state.update {
             it.copy(
-                items = sort(visible, it.sortMode),
+                items = sort(visible, it.sortMode, it.conversationOrder),
                 totalBytes = visible.sumOf { item -> item.size },
                 selection = emptySet(),
                 selectionBytes = 0L,
@@ -500,7 +518,11 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         _state.update {
             it.copy(
                 sortMode = mode,
-                items = sort(searchFiltered(visibleItemsOf(rawItems), it), mode),
+                items = sort(
+                    searchFiltered(visibleItemsOf(rawItems), it),
+                    mode,
+                    it.conversationOrder,
+                ),
                 selection = emptySet(),
                 selectionBytes = 0L,
             ).withRows()
@@ -508,6 +530,28 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         // Selecting the conversation grouping is the first moment the map matters;
         // loading it then keeps a gallery that never uses it free of the read.
         if (mode == SortMode.CONVERSATION) refreshConversations()
+    }
+
+    /**
+     * Reorders the pictures inside each conversation, leaving the groups where they
+     * are. A no-op outside the conversation grouping, so the choice is safe to make
+     * at any time (the menu only offers it there, though).
+     */
+    fun setConversationOrder(order: ConversationOrder) {
+        endDrag()
+        _state.update {
+            val mode = it.sortMode
+            it.copy(
+                conversationOrder = order,
+                items = if (mode == SortMode.CONVERSATION) {
+                    sort(searchFiltered(visibleItemsOf(rawItems), it), mode, order)
+                } else {
+                    it.items
+                },
+                selection = emptySet(),
+                selectionBytes = 0L,
+            ).withRows()
+        }
     }
 
     fun toggleCollapse(key: String) {
@@ -683,7 +727,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             rawItems = remaining
             byId = remaining.associateBy { it.id }
             val visible = searchFiltered(visibleItemsOf(remaining), snapshot)
-            val sorted = sort(visible, snapshot.sortMode)
+            val sorted = sort(visible, snapshot.sortMode, snapshot.conversationOrder)
             Published(
                 items = sorted,
                 displayRows = buildRows(sorted, snapshot.sortMode, snapshot.collapsed),
@@ -757,7 +801,11 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private fun peerOf(item: MediaItem): String =
         peerOfItem[item.source.indexKey(item.base)].orEmpty()
 
-    private fun sort(items: List<MediaItem>, mode: SortMode): List<MediaItem> {
+    private fun sort(
+        items: List<MediaItem>,
+        mode: SortMode,
+        order: ConversationOrder = ConversationOrder.TIME_DESC,
+    ): List<MediaItem> {
         val comparator = when (mode) {
             SortMode.TIME_DESC -> compareByDescending<MediaItem> { it.mtime }.thenBy { it.base }
             SortMode.TIME_ASC -> compareBy<MediaItem> { it.mtime }.thenBy { it.base }
@@ -766,12 +814,20 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             SortMode.NAME -> compareBy { it.base }
             SortMode.CONVERSATION -> {
                 // Groups are ordered by how many pictures they hold, so the busiest
-                // conversation is reachable without scrolling, and inside a group
-                // the newest picture comes first.
+                // conversation is reachable without scrolling. The peer stays the
+                // second key whatever the inner order is, because it is what keeps a
+                // conversation's pictures contiguous for the headers to find.
                 val counts = items.groupingBy { peerOf(it) }.eachCount()
+                val within = when (order) {
+                    ConversationOrder.TIME_DESC -> compareByDescending<MediaItem> { it.mtime }
+                    ConversationOrder.TIME_ASC -> compareBy<MediaItem> { it.mtime }
+                    ConversationOrder.SIZE_DESC -> compareByDescending<MediaItem> { it.size }
+                    ConversationOrder.SIZE_ASC -> compareBy<MediaItem> { it.size }
+                }
                 compareByDescending<MediaItem> { counts[peerOf(it)] ?: 0 }
                     .thenBy { peerOf(it) }
-                    .thenByDescending { it.mtime }
+                    .then(within)
+                    .thenBy { it.base }
             }
         }
         return items.sortedWith(comparator)
@@ -889,6 +945,14 @@ fun sortLabel(mode: SortMode): String = when (mode) {
     SortMode.SIZE_ASC -> "大小（小 → 大）"
     SortMode.NAME -> "名称"
     SortMode.CONVERSATION -> "会话"
+}
+
+/** How one conversation's pictures are ordered under their header. */
+fun conversationOrderLabel(order: ConversationOrder): String = when (order) {
+    ConversationOrder.TIME_DESC -> "时间（新 → 旧）"
+    ConversationOrder.TIME_ASC -> "时间（旧 → 新）"
+    ConversationOrder.SIZE_DESC -> "大小（大 → 小）"
+    ConversationOrder.SIZE_ASC -> "大小（小 → 大）"
 }
 
 /** Group header for pictures whose conversation the index does not know. */
