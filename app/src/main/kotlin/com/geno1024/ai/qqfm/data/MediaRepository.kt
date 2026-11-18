@@ -162,14 +162,7 @@ class MediaRepository(
                 }
             }
             runCatching { writer?.close() }
-            if (keep) {
-                if (tmp.renameTo(cacheFile(source))) {
-                    // A fresh scan is the whole truth, so the removals it covers are done with.
-                    runCatching { removedFile(source).delete() }
-                } else {
-                    runCatching { tmp.delete() }
-                }
-            }
+            if (keep) install(source, tmp)
             finished = true
         } finally {
             if (!finished) {
@@ -318,7 +311,6 @@ class MediaRepository(
         if (!keepIndex()) return
         runCatching {
             val tmp = File(context.cacheDir, "scan-${source.id}.tsv.tmp")
-            // A fresh scan is the whole truth, so the removals it covers are done with.
             tmp.bufferedWriter().use { writer ->
                 items.forEach { item ->
                     writer.append(item.path).append('\t')
@@ -328,9 +320,52 @@ class MediaRepository(
                         .append(item.previewPath.orEmpty()).append('\n')
                 }
             }
-            tmp.renameTo(cacheFile(source))
-            runCatching { removedFile(source).delete() }
+            install(source, tmp)
         }
+    }
+
+    /**
+     * Moves a freshly written listing into place, unless it says the same thing.
+     *
+     * The conversation index decides whether it has to rebuild from the size and
+     * timestamp of these files ([stamp]), so replacing an identical listing would
+     * make every scan look like a change and cost a build — the one case where the
+     * answer is "nothing to do" is exactly a scan that found nothing new.
+     */
+    private fun install(source: MediaSource, tmp: File) {
+        val target = cacheFile(source)
+        if (runCatching { sameContent(tmp, target) }.getOrDefault(false)) {
+            runCatching { tmp.delete() }
+        } else if (!tmp.renameTo(target)) {
+            runCatching { tmp.delete() }
+            return
+        }
+        // A fresh scan is the whole truth, so the removals it covers are done with.
+        runCatching { removedFile(source).delete() }
+    }
+
+    /** Line-for-line comparison of two listings, without holding either one whole. */
+    private fun sameContent(a: File, b: File): Boolean {
+        if (!b.exists() || a.length() != b.length()) return false
+        return runCatching {
+            a.bufferedReader().use { left ->
+                b.bufferedReader().use { right ->
+                    var same = true
+                    var done = false
+                    while (!done) {
+                        val line = left.readLine()
+                        if (line == null) {
+                            done = true
+                            same = right.readLine() == null
+                        } else if (line != right.readLine()) {
+                            done = true
+                            same = false
+                        }
+                    }
+                    same
+                }
+            }
+        }.getOrDefault(false)
     }
 
     /**

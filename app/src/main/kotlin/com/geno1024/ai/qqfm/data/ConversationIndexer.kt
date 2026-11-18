@@ -117,7 +117,8 @@ class ConversationIndexer(
      * Pass [force] to rebuild even when nothing changed; otherwise a matching token
      * returns the numbers the last build reported without touching the device. A
      * forced run also drops the watermarks, so it rescans both message tables from
-     * their first message instead of continuing where the last build stopped.
+     * their first message instead of continuing where the last build stopped, and
+     * walks the picture trees itself instead of trusting the listing a scan wrote.
      */
     fun build(force: Boolean = false, onPhase: (Phase) -> Unit = {}): Outcome {
         onPhase(Phase.Locating)
@@ -187,9 +188,19 @@ class ConversationIndexer(
                     }
                 }
                 else -> {
-                    val count = repository.streamCached(source) { item ->
-                        localBases.add(source.indexKey(item.base))
-                    } ?: repository.streamScan(source, { done ->
+                    // A forced build walks the tree itself. The listing it would reuse
+                    // is exactly what goes stale when QQ caches a picture after the
+                    // last scan, and a rebuild is the one thing that has to see those
+                    // files; the gallery's scan floods the same listing, so an ordinary
+                    // build reads it instead of paying for another walk.
+                    val cached = if (force) {
+                        null
+                    } else {
+                        repository.streamCached(source) { item ->
+                            localBases.add(source.indexKey(item.base))
+                        }
+                    }
+                    val count = cached ?: repository.streamScan(source, { done ->
                         onPhase(Phase.ReadingTrees(source, done, prior))
                     }) { item ->
                         localBases.add(source.indexKey(item.base))

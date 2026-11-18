@@ -215,9 +215,41 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun refresh() {
-        if (_state.value.rootAvailable == true) {
-            load(forceScan = true)
+        if (_state.value.rootAvailable != true) return
+        viewModelScope.launch {
+            loadNow(forceScan = true)
+            continueIndex()
             refreshConversations()
+        }
+    }
+
+    /**
+     * Files the pictures the scan just found, using the index that is already there.
+     *
+     * A picture QQ caches *after* the last index build — the ones the user just sent
+     * are the usual case, because sending writes the file immediately — has no entry:
+     * the build only files names it saw in its own listing. Refreshing the gallery
+     * rewrites that listing, so continuing the build here is what keeps those
+     * pictures out of 未分类. It is the cheap half of a build: the message pass resumes
+     * from its watermark and only reads rows newer than the last one, and the trees
+     * are read from the listing the scan just wrote rather than walked again.
+     *
+     * A first build is minutes of work and stays on the about page, so this does
+     * nothing until one has finished under the current index version.
+     */
+    private suspend fun continueIndex() {
+        val ran = withContext(Dispatchers.IO) {
+            if (conversations.lastResult() == null) return@withContext false
+            runCatching {
+                when (val outcome = conversations.build(force = false)) {
+                    // A matching token means the index already covers this listing.
+                    is ConversationIndexer.Outcome.Done -> !outcome.result.cached
+                    is ConversationIndexer.Outcome.Failed -> false
+                }
+            }.getOrDefault(false)
+        }
+        if (ran) {
+            _state.update { it.copy(message = "已把新缓存的图片归入会话") }
         }
     }
 
@@ -459,38 +491,40 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
      * back and forth stays cheap.
      */
     private fun load(forceScan: Boolean) {
+        viewModelScope.launch { loadNow(forceScan) }
+    }
+
+    private suspend fun loadNow(forceScan: Boolean) {
         val sources = _state.value.sources
         if (sources.isEmpty()) return
-        viewModelScope.launch {
-            _state.update { it.copy(loading = true, scanning = false, message = null) }
-            if (!forceScan) {
-                val cached = withContext(Dispatchers.IO) {
-                    sources.mapNotNull { source -> repository.loadCached(source) }
-                }
-                // Only reuse the cache when every selected tree has one. Otherwise a
-                // newly added tree (a video directory, say) would silently be left out
-                // just because the older trees already have an index.
-                if (cached.size == sources.size) {
-                    applyItems(cached.flatten(), fromScan = false)
-                    return@launch
-                }
+        _state.update { it.copy(loading = true, scanning = false, message = null) }
+        if (!forceScan) {
+            val cached = withContext(Dispatchers.IO) {
+                sources.mapNotNull { source -> repository.loadCached(source) }
             }
-
-            _state.update { it.copy(scanning = true, scannedCount = 0) }
-            val collected = ArrayList<MediaItem>(sources.size * 100_000)
-            val counted = intArrayOf(0)
-            for (source in sources) {
-                val outcome = withContext(Dispatchers.IO) {
-                    repository.scan(source) { found ->
-                        _state.update { it.copy(scannedCount = counted[0] + found) }
-                    }
-                }
-                collected += outcome.items
-                counted[0] += outcome.items.size
-                _state.update { it.copy(scannedCount = counted[0]) }
+            // Only reuse the cache when every selected tree has one. Otherwise a
+            // newly added tree (a video directory, say) would silently be left out
+            // just because the older trees already have an index.
+            if (cached.size == sources.size) {
+                applyItems(cached.flatten(), fromScan = false)
+                return
             }
-            applyItems(collected, fromScan = true)
         }
+
+        _state.update { it.copy(scanning = true, scannedCount = 0) }
+        val collected = ArrayList<MediaItem>(sources.size * 100_000)
+        val counted = intArrayOf(0)
+        for (source in sources) {
+            val outcome = withContext(Dispatchers.IO) {
+                repository.scan(source) { found ->
+                    _state.update { it.copy(scannedCount = counted[0] + found) }
+                }
+            }
+            collected += outcome.items
+            counted[0] += outcome.items.size
+            _state.update { it.copy(scannedCount = counted[0]) }
+        }
+        applyItems(collected, fromScan = true)
     }
 
     private fun applyItems(items: List<MediaItem>, fromScan: Boolean) {
