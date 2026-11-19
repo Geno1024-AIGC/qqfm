@@ -102,7 +102,7 @@ object Updater {
                 apkName = apk?.get("name") as? String,
                 apkSize = ((apk?.get("size") as? Number)?.toDouble() ?: 0.0).toLong(),
             )
-        }
+        }.filter { it.apkName != null }
     }
 
     /**
